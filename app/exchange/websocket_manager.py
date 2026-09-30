@@ -21,7 +21,7 @@ class BinanceWebSocketManager:
         on_candle_closed: Optional[Callable[[str, Dict], Coroutine]] = None,
         message_timeout_seconds: float = 90.0,
     ) -> None:
-        self.base_ws_url = base_ws_url.rstrip("/").removesuffix("/ws")
+        self.base_ws_url = self._normalize_base_ws_url(base_ws_url)
         if urlparse(self.base_ws_url).hostname != "fstream.binance.com":
             raise ValueError("Live market data must use Binance USD-M Futures (fstream.binance.com)")
         if timeframe.lower() != "1h":
@@ -125,11 +125,32 @@ class BinanceWebSocketManager:
         self._tasks.clear()
         self._active_connections = 0
 
+    @staticmethod
+    def _normalize_base_ws_url(url: str) -> str:
+        cleaned = url.strip().rstrip("/")
+        parsed = urlparse(cleaned)
+        if parsed.hostname != "fstream.binance.com":
+            raise ValueError("Live market data must use Binance USD-M Futures (fstream.binance.com)")
+        scheme = parsed.scheme or "wss"
+        netloc = parsed.netloc or "fstream.binance.com"
+        path = parsed.path.rstrip("/")
+        while path.endswith(("/ws", "/stream", "/market")):
+            if path.endswith("/ws"):
+                path = path[:-3].rstrip("/")
+            elif path.endswith("/stream"):
+                path = path[:-7].rstrip("/")
+            elif path.endswith("/market"):
+                path = path[:-7].rstrip("/")
+        return f"{scheme}://{netloc}/market"
+
+    def get_raw_stream_url(self, symbol: str) -> str:
+        clean_symbol = symbol.strip().lower()
+        return f"{self.base_ws_url}/ws/{clean_symbol}@kline_{self.timeframe}"
+
     def get_stream_url(self, symbols: List[str]) -> str:
-        base_url = self.base_ws_url.rstrip("/").removesuffix("/ws")
-        stream_names = [f"{s}@kline_{self.timeframe}" for s in symbols]
+        stream_names = [f"{s.strip().lower()}@kline_{self.timeframe}" for s in symbols]
         stream_param = "/".join(stream_names)
-        return f"{base_url}/stream?streams={stream_param}"
+        return f"{self.base_ws_url}/stream?streams={stream_param}"
 
     async def _run_batch_loop(self, batch_idx: int, batch_symbols: List[str]) -> None:
         backoff = 2
