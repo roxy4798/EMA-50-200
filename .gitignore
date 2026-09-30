@@ -1,0 +1,75 @@
+# ============================================================
+# NEXORA EMA CROSS — .gitignore
+# ============================================================
+
+# Environment variables & Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+id_rsa*
+
+# SQLite Database & Runtime storage
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# Generated Charts & Runtime Output Images
+charts/*
+!charts/.gitkeep
+*.png
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# Node & Frontend Dashboard
+node_modules/
+dashboard/node_modules/
+dist/
+dashboard/dist/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS Artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
