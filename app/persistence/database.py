@@ -295,3 +295,121 @@ class Database:
             )
             row = await cursor.fetchone()
             return int(row[0]) if row else None
+
+    async def get_last_signal_for_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Fetch the latest recorded golden cross for a specific symbol."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, symbol, timeframe, candle_timestamp, signal_time_utc,
+                       ema50, ema200, close_price, chart_image_path, telegram_sent, is_live
+                FROM signals
+                WHERE symbol = ?
+                ORDER BY candle_timestamp DESC, id DESC
+                LIMIT 1
+                """,
+                (symbol.upper(),),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_signals_page(self, page: int = 1, page_size: int = 10) -> Tuple[List[Dict[str, Any]], int]:
+        """Fetch paginated signals along with the total count."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            count_cursor = await db.execute("SELECT COUNT(*) FROM signals")
+            count_row = await count_cursor.fetchone()
+            total_count = count_row[0] if count_row else 0
+
+            safe_page = max(1, page)
+            offset = (safe_page - 1) * page_size
+            cursor = await db.execute(
+                """
+                SELECT id, symbol, timeframe, candle_timestamp, signal_time_utc,
+                       ema50, ema200, close_price, chart_image_path, telegram_sent, is_live, created_at
+                FROM signals
+                ORDER BY candle_timestamp DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (page_size, offset),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows], total_count
+
+    async def get_history_stats(self) -> Dict[str, Any]:
+        """Fetch aggregated signal statistics for 24H, 7D, 30D windows and latest cross."""
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        ms_24h = now_ms - (24 * 3600 * 1000)
+        ms_7d = now_ms - (7 * 24 * 3600 * 1000)
+        ms_30d = now_ms - (30 * 24 * 3600 * 1000)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            c = await db.execute("SELECT COUNT(*) FROM signals")
+            r = await c.fetchone()
+            total = r[0] if r else 0
+
+            c24 = await db.execute("SELECT COUNT(*) FROM signals WHERE candle_timestamp >= ?", (ms_24h,))
+            r24 = await c24.fetchone()
+            count_24h = r24[0] if r24 else 0
+
+            c7 = await db.execute("SELECT COUNT(*) FROM signals WHERE candle_timestamp >= ?", (ms_7d,))
+            r7 = await c7.fetchone()
+            count_7d = r7[0] if r7 else 0
+
+            c30 = await db.execute("SELECT COUNT(*) FROM signals WHERE candle_timestamp >= ?", (ms_30d,))
+            r30 = await c30.fetchone()
+            count_30d = r30[0] if r30 else 0
+
+            db.row_factory = aiosqlite.Row
+            clast = await db.execute(
+                """
+                SELECT symbol, signal_time_utc, candle_timestamp, close_price, ema50, ema200, is_live
+                FROM signals
+                ORDER BY candle_timestamp DESC, id DESC
+                LIMIT 1
+                """
+            )
+            rlast = await clast.fetchone()
+            latest = dict(rlast) if rlast else None
+
+        return {
+            "total": total,
+            "count_24h": count_24h,
+            "count_7d": count_7d,
+            "count_30d": count_30d,
+            "latest": latest,
+        }
+
+    async def get_signals_in_window(self, window_hours: int = 24, limit: int = 10) -> List[Dict[str, Any]]:
+        """Fetch latest signals within a specific lookback window in hours."""
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        cutoff_ms = now_ms - (window_hours * 3600 * 1000)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, symbol, timeframe, candle_timestamp, signal_time_utc,
+                       ema50, ema200, close_price, chart_image_path, telegram_sent, is_live
+                FROM signals
+                WHERE candle_timestamp >= ?
+                ORDER BY candle_timestamp DESC, id DESC
+                LIMIT ?
+                """,
+                (cutoff_ms, limit),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def get_live_signals_today_count(self) -> int:
+        """Fetch the count of live detected signals today in UTC."""
+        now = datetime.now(timezone.utc)
+        start_of_day = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        start_ms = int(start_of_day.timestamp() * 1000)
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM signals WHERE is_live = 1 AND candle_timestamp >= ?",
+                (start_ms,),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0

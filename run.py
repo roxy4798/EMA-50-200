@@ -114,6 +114,18 @@ async def main() -> None:
     signal_engine.set_symbols(symbols)
     ws_manager.set_symbols(symbols)
 
+    # Wire services to Telegram Notifier & start command listener
+    telegram_notifier.set_services(
+        signal_engine=signal_engine,
+        ws_manager=ws_manager,
+        database=db,
+        binance_client=binance_client,
+        alert_queue=alert_queue,
+        chart_data_provider=chart_data,
+        chart_renderer=chart_renderer,
+    )
+    await telegram_notifier.start()
+
     # 7. Start FastAPI Web Server in asyncio task
     api_app = create_app(
         signal_engine=signal_engine,

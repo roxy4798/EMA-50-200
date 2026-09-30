@@ -66,6 +66,20 @@ Institutional market-data visualization and real-time monitoring engine for **Bi
 6. **Strictly Informational (Zero Trading Features)**:
    - Contains **NO** Entry, Stop Loss, Take Profit, Leverage, Margin, Position, or PnL metrics. Exclusively dedicated to quantitative Golden Cross market monitoring.
 
+7. **Professional Interactive Telegram Command System**:
+   - Clean, read-only Telegram terminal interface with automatic command menu registration (`setMyCommands`).
+   - Commands:
+     - `/start`: Welcome screen with quick navigation.
+     - `/dashboard`: Live subsystem statuses, monitored universe, signal counts, and uptime.
+     - `/market`: Real-time market scanner, active connections, streams, and 1H candle status.
+     - `/alerts`: Recent Golden Cross alerts from SQLite database with pagination (`[ ← ] [ page / total ] [ → ]`).
+     - `/symbol <SYMBOL>`: Inspects real-time EMA50 / EMA200 structure, signal status, and last cross, with on-demand `[ VIEW CHART ]` generation.
+     - `/history`: Aggregated metrics (Total, 24H, 7D, 30D) and interactive lookback window filters.
+     - `/status`: Technical health check, error counts (429/418), reconnect metrics, and uptime.
+     - `/help`: Concisely formatted command guide.
+   - Interactive inline keyboards update existing messages in place without channel spam.
+   - Fully decoupled from live alert delivery and WebSocket execution.
+
 ---
 
 ## Project Structure
