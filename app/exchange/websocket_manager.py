@@ -19,6 +19,7 @@ class BinanceWebSocketManager:
         base_ws_url: str = "wss://fstream.binance.com",
         timeframe: str = "1h",
         on_candle_closed: Optional[Callable[[str, Dict], Coroutine]] = None,
+        message_timeout_seconds: float = 90.0,
     ) -> None:
         self.base_ws_url = base_ws_url.rstrip("/").removesuffix("/ws")
         if urlparse(self.base_ws_url).hostname != "fstream.binance.com":
@@ -27,21 +28,30 @@ class BinanceWebSocketManager:
             raise ValueError("NEXORA live scanner supports the 1h timeframe only")
         self.timeframe = timeframe
         self.on_candle_closed = on_candle_closed
+        self.message_timeout_seconds = message_timeout_seconds
         self.symbols: List[str] = []
         self._running = False
         self._tasks: List[asyncio.Task] = []
         self.candles_closed_count = 0
         self.total_klines_received = 0
+        self.total_messages_received = 0
         self.reconnect_count = 0
+        self.last_message_received_at: Optional[float] = None
         self.last_kline_received_at: Optional[float] = None
         self.last_candle_time: Optional[int] = None
         self.last_closed_candle_received_at: Optional[float] = None
         self.last_symbol_closed: Optional[str] = None
         self._active_connections = 0
+        self._workers_with_data: set[int] = set()
+        self._workers_with_kline: set[int] = set()
 
     @property
     def is_connected(self) -> bool:
         return self._active_connections > 0
+
+    @property
+    def ws_connected(self) -> bool:
+        return self.is_connected
 
     def get_market_data_health(self) -> Dict[str, Any]:
         """Provides fine-grained health metrics separating connection from data reception (Section 8)."""
@@ -68,19 +78,29 @@ class BinanceWebSocketManager:
             "status": status,
             "is_healthy": is_healthy,
             "is_connected": is_conn,
+            "ws_connected": is_conn,
             "active_connections": self._active_connections,
+            "total_messages_received": self.total_messages_received,
             "total_klines_received": self.total_klines_received,
             "candles_closed_count": self.candles_closed_count,
+            "last_message_received_at": self.last_message_received_at,
             "last_kline_received_at": last_rcv,
             "last_closed_candle_time": self.last_candle_time,
             "last_closed_candle_received_at": self.last_closed_candle_received_at,
+            "last_symbol_closed": self.last_symbol_closed,
             "reconnect_count": self.reconnect_count,
         }
 
     def set_symbols(self, symbols: List[str]) -> None:
         from app.exchange.binance_client import BinanceFuturesClient
         client = BinanceFuturesClient()
-        self.symbols = [client.resolve_symbol(s).lower() for s in symbols]
+        self.symbols = list(dict.fromkeys(client.resolve_symbol(s).lower() for s in symbols))
+
+    @staticmethod
+    def partition_symbols(symbols: List[str], batch_size: int = 100) -> List[List[str]]:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        return [symbols[i : i + batch_size] for i in range(0, len(symbols), batch_size)]
 
     async def start(self) -> None:
         self._running = True
@@ -90,7 +110,7 @@ class BinanceWebSocketManager:
             logger.warning("No symbols provided to WebSocketManager.")
             return
 
-        batches = [self.symbols[i : i + batch_size] for i in range(0, len(self.symbols), batch_size)]
+        batches = self.partition_symbols(self.symbols, batch_size)
         logger.info(f"Starting {len(batches)} WebSocket connection(s) for {len(self.symbols)} symbols...")
 
         for idx, batch in enumerate(batches):
@@ -126,19 +146,36 @@ class BinanceWebSocketManager:
                 ) as ws:
                     self._active_connections += 1
                     backoff = 2
-                    logger.info(f"[WS Worker {batch_idx}] Connected successfully.")
+                    self._workers_with_data.discard(batch_idx)
+                    self._workers_with_kline.discard(batch_idx)
+                    logger.info(f"WS CONNECTED [worker {batch_idx}] streams={len(batch_symbols)}")
 
-                    async for raw_msg in ws:
+                    while self._running:
+                        raw_msg = await asyncio.wait_for(
+                            ws.recv(), timeout=self.message_timeout_seconds
+                        )
                         if not self._running:
                             break
                         try:
                             msg = json.loads(raw_msg)
-                            await self._handle_message(msg)
+                            if batch_idx not in self._workers_with_data:
+                                self._workers_with_data.add(batch_idx)
+                                logger.info("WS DATA RECEIVED [worker %s]", batch_idx)
+                            await self._handle_message(msg, batch_idx=batch_idx)
                         except Exception as e:
                             logger.error(f"[WS Worker {batch_idx}] Message parsing error: {e}")
 
             except asyncio.CancelledError:
                 break
+            except asyncio.TimeoutError:
+                self.reconnect_count += 1
+                logger.warning(
+                    "WS DATA TIMEOUT [worker %s]: no application message for %.0fs; "
+                    "reconnecting (count=%s)",
+                    batch_idx, self.message_timeout_seconds, self.reconnect_count,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
             except Exception as e:
                 self.reconnect_count += 1
                 logger.warning(
@@ -150,8 +187,16 @@ class BinanceWebSocketManager:
                 if self._active_connections > 0:
                     self._active_connections -= 1
 
-    async def _handle_message(self, data: Dict) -> None:
+    async def _handle_message(self, data: Dict, batch_idx: Optional[int] = None) -> None:
+        if not isinstance(data, dict):
+            logger.warning("Ignoring non-object WebSocket application message")
+            return
+        self.total_messages_received += 1
+        self.last_message_received_at = time.time()
         payload = data.get("data", data)
+        if not isinstance(payload, dict):
+            logger.warning("Ignoring malformed WebSocket payload")
+            return
         event_type = payload.get("e")
 
         if event_type == "kline":
@@ -177,6 +222,9 @@ class BinanceWebSocketManager:
                 return
             self.total_klines_received += 1
             self.last_kline_received_at = time.time()
+            if batch_idx is not None and batch_idx not in self._workers_with_kline:
+                self._workers_with_kline.add(batch_idx)
+                logger.info("KLINE RECEIVED [worker %s] symbol=%s interval=%s", batch_idx, symbol, interval)
             if is_closed and symbol:
                 self.candles_closed_count += 1
                 self.last_candle_time = timestamp
