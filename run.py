@@ -10,6 +10,7 @@ import asyncio
 import logging
 import signal
 import sys
+from typing import Optional
 import uvicorn
 
 from app.config import settings
@@ -153,10 +154,14 @@ async def main() -> None:
         )
         terminal_dashboard.start()
 
-    # Post initialization: scan top symbols for historical crosses to ensure rich dashboard visualization immediately
+    # Post initialization: scan all symbols for historical crosses
+    # Cap at 50 for fast startup; remaining symbols get full live detection coverage
+    HISTORICAL_SCAN_LIMIT = 50
     async def post_init():
         await init_task
-        for s in symbols[:6]:
+        scan_targets = symbols[:HISTORICAL_SCAN_LIMIT]
+        logger.info(f"Scanning historical Golden Crosses for {len(scan_targets)}/{len(symbols)} symbols...")
+        for s in scan_targets:
             await signal_engine.scan_and_record_historical_crosses(s)
 
     asyncio.create_task(post_init())
