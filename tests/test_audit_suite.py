@@ -273,3 +273,67 @@ async def test_telegram_safe_connectivity():
     assert res["configured"] is False
     assert res["connected"] is False
     await notifier_missing.close()
+
+
+@pytest.mark.asyncio
+async def test_candle_limit_sync_and_rest_pacing(tmp_path):
+    """Verifies CANDLE_LIMIT is synchronized to >=200 for EMA200 and REST pacing protects rate limits."""
+    import time
+    from unittest.mock import AsyncMock
+    from app.config import settings
+
+    assert settings.candle_limit == 250
+    assert settings.candle_limit >= settings.ema_slow
+
+    db_path = str(tmp_path / "test_pacing.db")
+    db = Database(db_path=db_path)
+    await db.init()
+
+    client = BinanceFuturesClient()
+    telegram = TelegramNotifier(enabled=False)
+    chart_data = ChartDataProvider(client, db)
+    renderer = ChartRenderer(output_dir=str(tmp_path / "charts"))
+    queue = AlertQueue(chart_data, renderer, telegram, db)
+
+    engine = SignalEngine(
+        binance_client=client,
+        database=db,
+        alert_queue=queue,
+        candle_limit=settings.candle_limit,
+    )
+    assert engine.candle_limit == 250
+
+    call_timestamps = []
+
+    async def mock_get_klines(sym, interval="1h", limit=250, only_closed=True, **kwargs):
+        call_timestamps.append(time.monotonic())
+        # Return 250 fake candles
+        return [
+            {
+                "timestamp": 1700000000000 + i * 3600000,
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 10.0,
+                "close_time": 1700000000000 + (i + 1) * 3600000 - 1,
+            }
+            for i in range(limit)
+        ]
+
+    client.get_klines = AsyncMock(side_effect=mock_get_klines)
+    engine.set_symbols(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+
+    pacing_ms = 50.0  # Use 50ms for fast test execution
+    t0 = time.monotonic()
+    await engine.initialize_symbols(max_concurrency=3, pacing_delay_ms=pacing_ms)
+    elapsed = time.monotonic() - t0
+
+    # 3 symbols fetched with 50ms pacing between requests
+    assert len(call_timestamps) == 3
+    for i in range(1, len(call_timestamps)):
+        diff_ms = (call_timestamps[i] - call_timestamps[i - 1]) * 1000.0
+        assert diff_ms >= pacing_ms * 0.85  # Pacing enforced within timer precision
+
+    assert len(engine.initialized_symbols) == 3
+    await client.close()

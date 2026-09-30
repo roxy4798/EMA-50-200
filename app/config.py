@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     timeframe: str = Field(default="1h")
     ema_fast: int = Field(default=50)
     ema_slow: int = Field(default=200)
-    candle_limit: int = Field(default=150)
+    candle_limit: int = Field(default=250)
 
     # Symbol filtering
     symbols: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,NEARUSDT,SUIUSDT,APTUSDT,ARBUSDT,OPUSDT,1000PEPEUSDT")

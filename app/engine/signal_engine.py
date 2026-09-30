@@ -30,7 +30,7 @@ class SignalEngine:
         timeframe: str = "1h",
         fast_period: int = 50,
         slow_period: int = 200,
-        candle_limit: int = 150,
+        candle_limit: int = 250,
     ) -> None:
         self.binance_client = binance_client
         self.database = database
@@ -54,10 +54,31 @@ class SignalEngine:
     def set_symbols(self, symbols: List[str]) -> None:
         self.symbols = [s.upper() for s in symbols]
 
-    async def initialize_symbols(self, max_concurrency: int = 8) -> None:
-        """Fetch historical candles for all monitored symbols with safe retry/backoff."""
-        logger.info(f"Initializing {len(self.symbols)} symbols with historical 1H candles...")
+    async def initialize_symbols(
+        self,
+        max_concurrency: int = 5,
+        pacing_delay_ms: float = 160.0,
+    ) -> None:
+        """Fetch historical candles for all monitored symbols with safe retry/backoff and rate-limit pacing."""
+        logger.info(
+            f"Initializing {len(self.symbols)} symbols with historical 1H candles "
+            f"(limit={self.candle_limit}, pacing={pacing_delay_ms}ms)..."
+        )
         semaphore = asyncio.Semaphore(max_concurrency)
+        pacer_lock = asyncio.Lock()
+        last_request_time = 0.0
+
+        async def paced_get_klines(sym: str, limit: int, **kwargs) -> List[Dict[str, Any]]:
+            nonlocal last_request_time
+            async with pacer_lock:
+                now = time.monotonic()
+                elapsed_ms = (now - last_request_time) * 1000.0
+                if elapsed_ms < pacing_delay_ms:
+                    await asyncio.sleep((pacing_delay_ms - elapsed_ms) / 1000.0)
+                last_request_time = time.monotonic()
+                return await self.binance_client.get_klines(
+                    sym, interval=self.timeframe, limit=limit, only_closed=True, **kwargs
+                )
 
         async def init_single(raw_sym: str) -> None:
             sym = self.binance_client.resolve_symbol(raw_sym)
@@ -69,14 +90,12 @@ class SignalEngine:
                         candles: List[Dict[str, Any]] = []
 
                         if last_cached_ts:
-                            cached = await self.database.get_cached_candles(sym, self.timeframe, limit=250)
+                            cached = await self.database.get_cached_candles(sym, self.timeframe, limit=self.candle_limit)
                             now_ms = int(time.time() * 1000)
                             if now_ms - last_cached_ts > 3600_000 * 2:
-                                missing = await self.binance_client.get_klines(
+                                missing = await paced_get_klines(
                                     sym,
-                                    interval=self.timeframe,
                                     limit=100,
-                                    only_closed=True,
                                     start_time=last_cached_ts + 3600_000,
                                 )
                                 seen_ts = {c["timestamp"] for c in cached}
@@ -89,12 +108,12 @@ class SignalEngine:
                             else:
                                 candles = cached
 
-                        if not candles or len(candles) < 150:
-                            candles = await self.binance_client.get_klines(
-                                sym, interval=self.timeframe, limit=250, only_closed=True
+                        if not candles or len(candles) < self.slow_period:
+                            candles = await paced_get_klines(
+                                sym, limit=self.candle_limit
                             )
 
-                        if candles and len(candles) >= 50:
+                        if candles and len(candles) >= self.fast_period:
                             df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
                             enriched_candles = df.to_dict(orient="records")
                             async with self._lock:
@@ -255,7 +274,7 @@ class SignalEngine:
                 async def warm_new(sym: str):
                     async with semaphore:
                         try:
-                            candles = await self.binance_client.get_klines(sym, interval=self.timeframe, limit=250, only_closed=True)
+                            candles = await self.binance_client.get_klines(sym, interval=self.timeframe, limit=self.candle_limit, only_closed=True)
                             if candles:
                                 df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
                                 async with self._lock:

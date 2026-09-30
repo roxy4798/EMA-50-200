@@ -112,9 +112,10 @@ nexora-ema-cross/
 │   └── vite.config.ts
 ├── tests/
 │   ├── test_indicators.py         # Tests for EMA and Golden Cross condition
-│   ├── test_chart_data.py         # Tests for price formatting and data provider
 │   ├── test_chart_renderer.py     # Tests for 1600x900 PNG generation & error safety
-│   └── test_alert_queue.py        # Tests for async queue and API endpoints
+│   ├── test_alert_queue.py        # Tests for async queue and API endpoints
+│   ├── test_audit_suite.py        # Mathematical precision, restart persistence & duplicate prevention
+│   └── test_live_pipeline.py      # End-to-end live pipeline verification (TEST MODE)
 ├── data/                          # SQLite database location (nexora.db)
 ├── logs/                          # System logs
 ├── charts/                        # Generated PNG chart images (1600x900)
@@ -141,7 +142,7 @@ BINANCE_WS_BASE_URL=wss://fstream.binance.com/ws
 TIMEFRAME=1h
 EMA_FAST=50
 EMA_SLOW=200
-CANDLE_LIMIT=150
+CANDLE_LIMIT=250
 SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,NEARUSDT
 PORT=8080
 ```

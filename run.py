@@ -136,7 +136,9 @@ async def main() -> None:
     server_task = asyncio.create_task(server.serve())
 
     # 8. Start Background Symbol Initialization & Historical Scan
-    init_task = asyncio.create_task(signal_engine.initialize_symbols(max_concurrency=8))
+    init_task = asyncio.create_task(
+        signal_engine.initialize_symbols(max_concurrency=5, pacing_delay_ms=160.0)
+    )
 
     # 9. Start WebSocket Manager
     await ws_manager.start()

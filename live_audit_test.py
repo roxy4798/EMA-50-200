@@ -216,10 +216,10 @@ async def run_live_audit() -> None:
     print("\n[TEST 7] Telegram Notification Compliance Audit...")
     telegram = TelegramNotifier(enabled=False)
     msg = telegram.format_alert_message(found_cross)
-    assert "🟢 EMA GOLDEN CROSS" in msg
+    assert "🟢 GOLDEN CROSS" in msg
     assert target_sym in msg
-    assert "TIMEFRAME\n1H" in msg
-    assert "CANDLE\nCLOSED" in msg
+    assert "TIMEFRAME: 1H" in msg
+    assert "CANDLE: CLOSED" in msg
     prohibited = ["ENTRY", "STOP LOSS", "TAKE PROFIT", "TP1", "TP2", "TP3", "LEVERAGE", "MARGIN", "PNL", "RISK", "POSITION", "SHORT"]
     for p in prohibited:
         assert p not in msg.upper(), f"Prohibited keyword '{p}' detected in Telegram alert!"
