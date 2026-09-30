@@ -115,6 +115,49 @@ class Database:
                 await db.commit()
                 return row[0] if row else 0
 
+    async def save_historical_signals_batch(self, signals: List[SignalRecord]) -> int:
+        """Batch inserts historical golden cross signals idempotently in a single transaction.
+
+        Uses INSERT ... ON CONFLICT(symbol, timeframe, candle_timestamp) DO NOTHING
+        to preserve idempotency and avoid overwriting live signals or re-inserting
+        existing records.
+        Returns the number of new rows inserted.
+        """
+        if not signals:
+            return 0
+
+        records = [
+            (
+                s.symbol.upper(),
+                s.timeframe.upper(),
+                s.candle_timestamp,
+                s.signal_time_utc,
+                s.ema50,
+                s.ema200,
+                s.close_price,
+                s.chart_image_path,
+                1 if s.telegram_sent else 0,
+                0,  # is_live = 0 strictly for historical signals
+            )
+            for s in signals
+        ]
+
+        async with self._lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                total_before = db.total_changes
+                await db.executemany(
+                    """
+                    INSERT INTO signals (
+                        symbol, timeframe, candle_timestamp, signal_time_utc,
+                        ema50, ema200, close_price, chart_image_path, telegram_sent, is_live
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol, timeframe, candle_timestamp) DO NOTHING
+                    """,
+                    records,
+                )
+                await db.commit()
+                return db.total_changes - total_before
+
     async def update_signal_delivery(self, signal_id: int, chart_image_path: Optional[str], telegram_sent: bool) -> None:
         async with self._lock:
             async with aiosqlite.connect(self.db_path) as db:

@@ -217,17 +217,17 @@ class SignalEngine:
     async def scan_and_record_historical_crosses(self, symbol: str) -> List[GoldenCrossSignal]:
         """Scans loaded history for existing Golden Crosses and records them in DB idempotently without triggering alerts."""
         symbol = symbol.upper()
-        history = self.candles_history.get(symbol)
+        async with self._lock:
+            history = list(self.candles_history.get(symbol, []))
         if not history:
             return []
 
         df = enrich_candles_with_ema(history, self.fast_period, self.slow_period)
         crosses = find_all_golden_crosses(df, symbol=symbol, timeframe=self.timeframe)
 
-        for c in crosses:
-            already = await self.database.has_signal(c.symbol, c.timeframe, c.candle_timestamp)
-            if not already:
-                record = SignalRecord(
+        if crosses:
+            records = [
+                SignalRecord(
                     id=None,
                     symbol=c.symbol,
                     timeframe=c.timeframe,
@@ -238,24 +238,73 @@ class SignalEngine:
                     close_price=c.close_price,
                     is_live=False,
                 )
-                await self.database.save_signal(record)
+                for c in crosses
+            ]
+            await self.database.save_historical_signals_batch(records)
 
-        if crosses:
-            self.historical_crosses_count += len(crosses)
-            self.total_signals_detected = max(self.total_signals_detected, len(crosses))
-            if not self.last_signal:
-                self.last_signal = {
-                    "symbol": crosses[-1].symbol,
-                    "timeframe": crosses[-1].timeframe,
-                    "candle_timestamp": crosses[-1].candle_timestamp,
-                    "signal_time_utc": crosses[-1].signal_time_utc,
-                    "close_price": crosses[-1].close_price,
-                    "ema50": crosses[-1].ema50,
-                    "ema200": crosses[-1].ema200,
-                    "is_live": False,
-                }
+            async with self._lock:
+                self.historical_crosses_count += len(crosses)
+                self.total_signals_detected = max(self.total_signals_detected, len(crosses))
+                if not self.last_signal:
+                    self.last_signal = {
+                        "symbol": crosses[-1].symbol,
+                        "timeframe": crosses[-1].timeframe,
+                        "candle_timestamp": crosses[-1].candle_timestamp,
+                        "signal_time_utc": crosses[-1].signal_time_utc,
+                        "close_price": crosses[-1].close_price,
+                        "ema50": crosses[-1].ema50,
+                        "ema200": crosses[-1].ema200,
+                        "is_live": False,
+                    }
 
         return crosses
+
+    async def scan_historical_symbols(
+        self,
+        symbols: List[str],
+        max_concurrency: int = 5,
+        total_symbols_count: Optional[int] = None,
+        log: Optional[logging.Logger] = None,
+    ) -> Dict[str, List[GoldenCrossSignal]]:
+        """Scans loaded history for multiple symbols with bounded concurrency."""
+        active_logger = log or logger
+        total_targets = len(symbols)
+        universe_total = total_symbols_count if total_symbols_count is not None else total_targets
+        active_logger.info(
+            f"Historical scan started: {total_targets}/{universe_total} symbols, concurrency={max_concurrency}"
+        )
+        semaphore = asyncio.Semaphore(max_concurrency)
+        completed = 0
+        total_crosses = 0
+        progress_lock = asyncio.Lock()
+        start_time = time.monotonic()
+        results: Dict[str, List[GoldenCrossSignal]] = {}
+
+        async def scan_one(sym: str) -> None:
+            nonlocal completed, total_crosses
+            async with semaphore:
+                try:
+                    crosses = await self.scan_and_record_historical_crosses(sym)
+                    n_crosses = len(crosses)
+                    results[sym] = crosses
+                except Exception as e:
+                    active_logger.error(f"Historical scan failed for {sym}: {e}")
+                    n_crosses = 0
+                    results[sym] = []
+
+                async with progress_lock:
+                    completed += 1
+                    total_crosses += n_crosses
+                    if completed % 5 == 0 or completed == total_targets:
+                        active_logger.info(f"Historical scan progress: {completed}/{total_targets}")
+
+        await asyncio.gather(*(scan_one(s) for s in symbols), return_exceptions=False)
+        duration = time.monotonic() - start_time
+        active_logger.info(
+            f"Historical scan complete: {completed}/{total_targets} symbols, "
+            f"{total_crosses} historical Golden Crosses found, duration={duration:.1f}s"
+        )
+        return results
 
     async def refresh_symbol_universe(self) -> List[str]:
         """Discovers new symbols from Binance without destroying existing valid EMA state (Req 23)."""

@@ -162,9 +162,12 @@ async def main() -> None:
     async def post_init():
         await init_task
         scan_targets = symbols[:HISTORICAL_SCAN_LIMIT]
-        logger.info(f"Scanning historical Golden Crosses for {len(scan_targets)}/{len(symbols)} symbols...")
-        for s in scan_targets:
-            await signal_engine.scan_and_record_historical_crosses(s)
+        await signal_engine.scan_historical_symbols(
+            scan_targets,
+            max_concurrency=5,
+            total_symbols_count=len(symbols),
+            log=logger,
+        )
 
     asyncio.create_task(post_init())
 
