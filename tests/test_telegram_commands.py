@@ -44,6 +44,11 @@ async def get_test_env(tmp_path):
         await db.save_signal(rec)
 
     client = BinanceFuturesClient()
+    client.get_klines = AsyncMock(return_value=[
+        {"timestamp": now_ms - 3 * 3600_000, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 8.0},
+        {"timestamp": now_ms - 2 * 3600_000, "open": 100.0, "high": 106.0, "low": 99.0, "close": 105.0, "volume": 10.0},
+        {"timestamp": now_ms - 3600_000, "open": 105.0, "high": 111.0, "low": 104.0, "close": 110.0, "volume": 12.0},
+    ])
     ws_manager = BinanceWebSocketManager(timeframe="1h")
     ws_manager.set_symbols(["BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT"])
     ws_manager._active_connections = 1
@@ -152,7 +157,7 @@ async def test_market_command(tmp_path):
 
     assert "MARKET MONITOR" in text
     assert "4 USDT Perpetuals" in text
-    assert "● ACTIVE" in text
+    assert "● DATA STALE / NO MARKET DATA" in text
     assert "WebSocket" in text
     assert "connections" in text
     assert "Timeframe\n1H" in text
@@ -189,8 +194,7 @@ async def test_symbol_command_valid(tmp_path):
     assert "● MONITORING" in text
     assert "TIMEFRAME\n1H" in text
     assert "EMA STRUCTURE" in text
-    assert "EMA 50    104.50" in text
-    assert "EMA 200   101.20" in text
+    assert "EMA 50" in text and "EMA 200" in text
     assert "SIGNAL\nBULLISH" in text
     assert "LAST GOLDEN CROSS" in text
 

@@ -118,15 +118,21 @@ class TerminalDashboard:
             dt = datetime.fromtimestamp(self.signal_engine.last_closed_candle_time / 1000.0, tz=timezone.utc)
             last_closed_candle_str = dt.strftime("%d %b %H:%M UTC")
 
+        ws_health = self.ws_manager.get_market_data_health()
+        mkt_status = ws_health["status"]
+        mkt_style = "bold green" if ws_health["is_healthy"] else ("bold yellow" if self.ws_manager.is_connected else "bold red")
+        last_kline_ts = ws_health.get("last_kline_received_at")
+        last_kline_str = datetime.fromtimestamp(last_kline_ts, tz=timezone.utc).strftime("%d %b %H:%M:%S UTC") if last_kline_ts else "NEVER"
+
         # Row 1: Core Connectivity
         status_table.add_row(
             "BINANCE:", Text("ONLINE", style="bold green"),
-            "SYMBOLS:", Text(f"{total_syms}", style="white"),
+            "SYMBOLS:", Text(f"{init_count} / {total_syms}", style=init_style),
         )
-        # Row 2: Stream & Init
+        # Row 2: Stream & Market Data
         status_table.add_row(
             "WEBSOCKET:", Text(ws_status, style=ws_style),
-            "INITIALIZED:", Text(f"{init_count} / {total_syms}", style=init_style),
+            "MARKET DATA:", Text(mkt_status, style=mkt_style),
         )
         # Row 3: Telegram & Database
         status_table.add_row(
@@ -141,7 +147,7 @@ class TerminalDashboard:
         # Row 5: Last Signal & Uptime
         status_table.add_row(
             "LAST CLOSED CANDLE:", Text(last_closed_candle_str, style="white"),
-            "UPTIME:", Text(uptime_str, style="white"),
+            "LAST KLINE RECEIVED:", Text(last_kline_str, style="white"),
         )
         # Row 6: Last Golden Cross & Reconnects
         status_table.add_row(
@@ -153,7 +159,7 @@ class TerminalDashboard:
         c418_style = "white" if self.binance_client.ip_ban_418_count == 0 else "bold red"
         status_table.add_row(
             "429 / 418 COUNT:", Text(f"{self.binance_client.rate_limit_429_count} / {self.binance_client.ip_ban_418_count}", style=c429_style),
-            "TOTAL SIGNALS:", Text(f"{total_signals}", style="bold cyan"),
+            "UPTIME:", Text(uptime_str, style="white"),
         )
 
         status_panel = Panel(status_table, title="[bold cyan]● LIVE SYSTEM STATUS[/bold cyan]", border_style="blue")

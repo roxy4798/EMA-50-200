@@ -36,6 +36,10 @@ class SignalEngine:
         self.database = database
         self.alert_queue = alert_queue
         self.timeframe = timeframe.lower()
+        if self.timeframe != "1h":
+            raise ValueError("NEXORA SignalEngine supports the 1h timeframe only")
+        if fast_period != 50 or slow_period != 200 or candle_limit != 250:
+            raise ValueError("NEXORA canonical frame is fixed at EMA50/EMA200 with 250 closed 1H candles")
         self.fast_period = fast_period
         self.slow_period = slow_period
         self.candle_limit = candle_limit
@@ -92,6 +96,9 @@ class SignalEngine:
                         if last_cached_ts:
                             cached = await self.database.get_cached_candles(sym, self.timeframe, limit=self.candle_limit)
                             now_ms = int(time.time() * 1000)
+                            # The cache is a warm start only. Always refresh from USD-M
+                            # Futures so /symbol, charts, and signal evaluation share the
+                            # newest closed exchange candle.
                             if now_ms - last_cached_ts > 3600_000 * 2:
                                 missing = await paced_get_klines(
                                     sym,
@@ -108,12 +115,13 @@ class SignalEngine:
                             else:
                                 candles = cached
 
-                        if not candles or len(candles) < self.slow_period:
-                            candles = await paced_get_klines(
-                                sym, limit=self.candle_limit
-                            )
+                        fresh = await paced_get_klines(sym, limit=self.candle_limit)
+                        if fresh:
+                            by_timestamp = {int(c["timestamp"]): c for c in candles}
+                            by_timestamp.update({int(c["timestamp"]): c for c in fresh})
+                            candles = sorted(by_timestamp.values(), key=lambda c: int(c["timestamp"]))[-self.candle_limit:]
 
-                        if candles and len(candles) >= self.fast_period:
+                        if candles and len(candles) >= self.candle_limit:
                             df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
                             enriched_candles = df.to_dict(orient="records")
                             async with self._lock:
@@ -146,31 +154,53 @@ class SignalEngine:
 
     async def handle_closed_candle(self, symbol: str, candle: Dict[str, Any]) -> Optional[GoldenCrossSignal]:
         """Called when a 1H candle closes for a symbol."""
+        if self.timeframe != "1h" or not candle.get("is_closed", False):
+            logger.warning("LIVE_SIGNAL_REJECTED: only closed Binance USD-M Futures 1H candles are eligible")
+            return None
+        try:
+            timestamp = int(candle["timestamp"])
+            if timestamp <= 0:
+                raise ValueError("invalid 1H open timestamp")
+        except (KeyError, TypeError, ValueError):
+            logger.error("LIVE_SIGNAL_REJECTED: invalid 1H candle timestamp for %s", symbol)
+            return None
         symbol = symbol.upper()
-        self.last_closed_candle_time = max(self.last_closed_candle_time or 0, int(candle["timestamp"]))
+        if self.symbols and symbol not in self.symbols:
+            logger.error("LIVE_SIGNAL_REJECTED: unmonitored symbol %s", symbol)
+            return None
+        self.last_closed_candle_time = max(self.last_closed_candle_time or 0, timestamp)
 
         async with self._lock:
             history = self.candles_history.get(symbol, [])
+            if history and timestamp < int(history[-1]["timestamp"]):
+                logger.warning(
+                    "LIVE_SIGNAL_REJECTED: out-of-order candle for %s timestamp=%s latest=%s",
+                    symbol, timestamp, history[-1]["timestamp"],
+                )
+                return None
             if history and history[-1]["timestamp"] == candle["timestamp"]:
                 history[-1] = candle
             else:
                 history.append(candle)
 
-            if len(history) > 300:
-                history = history[-300:]
+            if len(history) > self.candle_limit:
+                history = history[-self.candle_limit:]
 
             # Enrich with EMA50 and EMA200
             df = enrich_candles_with_ema(history, self.fast_period, self.slow_period)
             self.candles_history[symbol] = df.to_dict(orient="records")
 
-            # Detect Golden Cross on the last closed candle
-            signal = detect_golden_cross(
-                df,
-                symbol=symbol,
-                timeframe=self.timeframe,
-                fast_col=f"ema_{self.fast_period}",
-                slow_col=f"ema_{self.slow_period}",
-            )
+            # Use the same fixed 250 closed-candle window as current chart and
+            # /symbol views; never evaluate a signal from a shorter EMA seed.
+            signal = None
+            if len(df) >= self.candle_limit:
+                signal = detect_golden_cross(
+                    df,
+                    symbol=symbol,
+                    timeframe=self.timeframe,
+                    fast_col=f"ema_{self.fast_period}",
+                    slow_col=f"ema_{self.slow_period}",
+                )
 
         if signal:
             # Duplicate prevention check (Req 11)
@@ -206,6 +236,8 @@ class SignalEngine:
                 ema200=signal.ema200,
                 close_price=signal.close_price,
                 is_live=True,
+                previous_ema50=signal.previous_ema50,
+                previous_ema200=signal.previous_ema200,
             )
             signal_id = await self.database.save_signal(record)
 
@@ -237,6 +269,8 @@ class SignalEngine:
                     ema200=c.ema200,
                     close_price=c.close_price,
                     is_live=False,
+                    previous_ema50=c.previous_ema50,
+                    previous_ema200=c.previous_ema200,
                 )
                 for c in crosses
             ]

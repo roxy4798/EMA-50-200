@@ -76,7 +76,7 @@ async def test_full_live_pipeline_e2e(tmp_path):
     base_ts = 1790000000000
     seed_candles = []
     # Generate 160 candles where EMA50 stays slightly below EMA200
-    for i in range(160):
+    for i in range(250):
         ts = base_ts + i * 3600_000
         seed_candles.append({
             "timestamp": ts,
@@ -90,7 +90,7 @@ async def test_full_live_pipeline_e2e(tmp_path):
     engine.candles_history[symbol] = seed_candles
 
     # 8. STEP 1 & 2: Simulate WebSocket closed candle message
-    trigger_ts = base_ts + 160 * 3600_000
+    trigger_ts = base_ts + 250 * 3600_000
     ws_candle_event = {
         "timestamp": trigger_ts,
         "open": 50000.0,
@@ -120,6 +120,7 @@ async def test_full_live_pipeline_e2e(tmp_path):
             "low": 63000.0,
             "close": 74000.0,
             "volume": 800.0,
+            "is_closed": True,
         }
         # Overwrite previous candle EMAs so fast <= slow, and next candle fast > slow
         engine.candles_history[symbol][-2]["ema_50"] = 50000.0

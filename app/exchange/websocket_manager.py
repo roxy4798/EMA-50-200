@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Callable, Coroutine, Dict, List, Optional
+import time
+from urllib.parse import urlparse
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 import websockets
 
 logger = logging.getLogger("nexora.websocket")
@@ -19,20 +21,61 @@ class BinanceWebSocketManager:
         on_candle_closed: Optional[Callable[[str, Dict], Coroutine]] = None,
     ) -> None:
         self.base_ws_url = base_ws_url.rstrip("/").removesuffix("/ws")
+        if urlparse(self.base_ws_url).hostname != "fstream.binance.com":
+            raise ValueError("Live market data must use Binance USD-M Futures (fstream.binance.com)")
+        if timeframe.lower() != "1h":
+            raise ValueError("NEXORA live scanner supports the 1h timeframe only")
         self.timeframe = timeframe
         self.on_candle_closed = on_candle_closed
         self.symbols: List[str] = []
         self._running = False
         self._tasks: List[asyncio.Task] = []
         self.candles_closed_count = 0
+        self.total_klines_received = 0
         self.reconnect_count = 0
+        self.last_kline_received_at: Optional[float] = None
         self.last_candle_time: Optional[int] = None
+        self.last_closed_candle_received_at: Optional[float] = None
         self.last_symbol_closed: Optional[str] = None
         self._active_connections = 0
 
     @property
     def is_connected(self) -> bool:
         return self._active_connections > 0
+
+    def get_market_data_health(self) -> Dict[str, Any]:
+        """Provides fine-grained health metrics separating connection from data reception (Section 8)."""
+        now = time.time()
+        is_conn = self.is_connected
+        last_rcv = self.last_kline_received_at
+
+        if not is_conn:
+            status = "DISCONNECTED"
+            is_healthy = False
+        elif last_rcv is None:
+            status = "DATA STALE / NO MARKET DATA"
+            is_healthy = False
+        else:
+            elapsed = now - last_rcv
+            if elapsed > 120.0:
+                status = f"DATA STALE / NO MARKET DATA ({int(elapsed)}s silent)"
+                is_healthy = False
+            else:
+                status = "HEALTHY"
+                is_healthy = True
+
+        return {
+            "status": status,
+            "is_healthy": is_healthy,
+            "is_connected": is_conn,
+            "active_connections": self._active_connections,
+            "total_klines_received": self.total_klines_received,
+            "candles_closed_count": self.candles_closed_count,
+            "last_kline_received_at": last_rcv,
+            "last_closed_candle_time": self.last_candle_time,
+            "last_closed_candle_received_at": self.last_closed_candle_received_at,
+            "reconnect_count": self.reconnect_count,
+        }
 
     def set_symbols(self, symbols: List[str]) -> None:
         from app.exchange.binance_client import BinanceFuturesClient
@@ -115,20 +158,38 @@ class BinanceWebSocketManager:
             k = payload.get("k", {})
             is_closed = k.get("x", False)
             symbol = k.get("s", "").upper()
+            interval = k.get("i")
 
             # Strictly require closed candle (k.x == True)
+            if interval != self.timeframe:
+                logger.warning("Ignoring non-%s Futures kline for %s", self.timeframe, symbol or "UNKNOWN")
+                return
+            if symbol.lower() not in self.symbols:
+                logger.warning("Ignoring kline for unsubscribed Futures symbol %s", symbol or "UNKNOWN")
+                return
+            try:
+                timestamp = int(k["t"])
+                values = [float(k[key]) for key in ("o", "h", "l", "c", "v")]
+                if timestamp <= 0 or any(v <= 0 for v in values[:4]):
+                    raise ValueError("invalid candle fields")
+            except (KeyError, TypeError, ValueError):
+                logger.error("Ignoring malformed Futures kline for %s", symbol)
+                return
+            self.total_klines_received += 1
+            self.last_kline_received_at = time.time()
             if is_closed and symbol:
                 self.candles_closed_count += 1
-                self.last_candle_time = int(k.get("t", 0))
+                self.last_candle_time = timestamp
+                self.last_closed_candle_received_at = time.time()
                 self.last_symbol_closed = symbol
 
                 candle_data = {
-                    "timestamp": int(k.get("t", 0)),
-                    "open": float(k.get("o", 0.0)),
-                    "high": float(k.get("h", 0.0)),
-                    "low": float(k.get("l", 0.0)),
-                    "close": float(k.get("c", 0.0)),
-                    "volume": float(k.get("v", 0.0)),
+                    "timestamp": timestamp,
+                    "open": values[0],
+                    "high": values[1],
+                    "low": values[2],
+                    "close": values[3],
+                    "volume": values[4],
                     "close_time": int(k.get("T", 0)),
                     "is_closed": True,
                 }

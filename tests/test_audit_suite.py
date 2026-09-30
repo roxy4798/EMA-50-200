@@ -248,10 +248,12 @@ async def test_live_vs_historical_signals_separation(tmp_path):
         "low": 104.0,
         "close": 118.0,
         "volume": 50.0,
+        "is_closed": True,
     }
     # Reset EMA so it crosses on this candle
     engine.candles_history["BTCUSDT"] = [
-        {"timestamp": ts_live - 3600000, "open": 98.0, "high": 99.0, "low": 97.0, "close": 98.0, "volume": 10.0, "ema_50": 98.0, "ema_200": 99.0},
+        {"timestamp": ts_live - (250 - i) * 3600000, "open": 98.0, "high": 99.0, "low": 97.0, "close": 98.0, "volume": 10.0}
+        for i in range(250)
     ]
     # Feed closed candle
     live_sig = await engine.handle_closed_candle("BTCUSDT", live_candle)

@@ -20,6 +20,8 @@ class SignalRecord:
     telegram_sent: bool = False
     is_live: bool = False
     created_at: Optional[str] = None
+    previous_ema50: Optional[float] = None
+    previous_ema200: Optional[float] = None
 
 
 @dataclass

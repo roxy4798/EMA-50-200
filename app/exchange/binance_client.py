@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 import aiohttp
 
 logger = logging.getLogger("nexora.exchange")
@@ -27,6 +28,9 @@ class BinanceFuturesClient:
 
     def __init__(self, base_url: str = "https://fapi.binance.com") -> None:
         self.base_url = base_url.rstrip("/")
+        parsed = urlparse(self.base_url)
+        if parsed.scheme != "https" or parsed.hostname != "fapi.binance.com":
+            raise ValueError("NEXORA REST market data must use Binance USD-M Futures (fapi.binance.com)")
         self._session: Optional[aiohttp.ClientSession] = None
         self.rate_limit_429_count = 0
         self.ip_ban_418_count = 0
@@ -106,6 +110,8 @@ class BinanceFuturesClient:
         start_time: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch historical klines/candlesticks for a symbol from Binance USD-M Futures."""
+        if interval != "1h":
+            raise ValueError("NEXORA only requests Binance USD-M Futures 1h candles")
         symbol = self.resolve_symbol(symbol)
         if time.time() < self._pause_until:
             wait_time = self._pause_until - time.time()
@@ -148,9 +154,11 @@ class BinanceFuturesClient:
                     }
                     candles.append(candle)
 
-                if only_closed and candles:
-                    # Drop the active candle if it is still open
-                    candles = candles[:-1]
+                if only_closed:
+                    # Determine closed state from Binance close timestamps instead
+                    # of assuming the final response row is always the open candle.
+                    now_ms = int(time.time() * 1000)
+                    candles = [c for c in candles if int(c["close_time"]) < now_ms]
 
                 return candles[-limit:]
         except Exception as e:

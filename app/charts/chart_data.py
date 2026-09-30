@@ -24,7 +24,8 @@ class ChartDataProvider:
         self.binance_client = binance_client
         self.database = database
         self.cache_ttl_seconds = cache_ttl_seconds
-        # In-memory timestamp check for cache validity
+        # Cache is written for downstream consumers, but current charts always
+        # read the canonical closed-candle frame from Futures REST.
         self._last_fetch_time: Dict[str, float] = {}
 
     async def get_chart_data(
@@ -41,9 +42,9 @@ class ChartDataProvider:
         TradingView Lightweight Charts.
         """
         symbol = symbol.upper()
-        now = time.time()
-        last_fetch = self._last_fetch_time.get(symbol, 0)
-
+        if timeframe.lower() != "1h":
+            raise ValueError("NEXORA charts support the 1h timeframe only")
+        timeframe = "1h"
         candles: List[Dict[str, Any]] = []
 
         # If target_timestamp is specified, fetch historical window around target
@@ -54,25 +55,13 @@ class ChartDataProvider:
                 symbol, interval=timeframe, limit=300, only_closed=True, end_time=end_req_time
             )
         else:
-            # 1. Check if we should fetch fresh from Binance
-            need_fresh = force_fresh or (now - last_fetch > self.cache_ttl_seconds)
-
-            if not need_fresh:
-                cached = await self.database.get_cached_candles(symbol, timeframe, limit=max(limit + 50, 250))
-                if len(cached) >= 60:
-                    candles = cached
-
-            if not candles:
-                fetch_limit = max(limit + 100, 250)
-                candles = await self.binance_client.get_klines(symbol, interval=timeframe, limit=fetch_limit, only_closed=True)
-                if candles:
-                    self._last_fetch_time[symbol] = now
-                    df = enrich_candles_with_ema(candles, fast_period=50, slow_period=200)
-                    candles_to_cache = df.to_dict(orient="records")
-                    await self.database.cache_candles(candles_to_cache, symbol, timeframe)
-                    candles = candles_to_cache
-                else:
-                    candles = await self.database.get_cached_candles(symbol, timeframe, limit=limit)
+            fetch_limit = 250
+            candles = await self.binance_client.get_klines(symbol, interval=timeframe, limit=fetch_limit, only_closed=True)
+            if candles:
+                df = enrich_candles_with_ema(candles, fast_period=50, slow_period=200)
+                candles_to_cache = df.to_dict(orient="records")
+                await self.database.cache_candles(candles_to_cache, symbol, timeframe)
+                candles = candles_to_cache
 
         if not candles:
             return {
@@ -87,6 +76,22 @@ class ChartDataProvider:
 
         # Ensure EMA is calculated across the full dataset
         df = enrich_candles_with_ema(candles, fast_period=50, slow_period=200)
+
+        # Reuse the exact stored EMA pair for recorded historical signal charts.
+        # This prevents a different REST window/EMA seed from changing the event
+        # values displayed in its panel.
+        target_signal = None
+        if target_timestamp:
+            target_signal = await self.database.get_signal_for_candle(symbol, timeframe, target_timestamp)
+            if target_signal:
+                matches = df.index[df["timestamp"] == target_timestamp].tolist()
+                if matches:
+                    pos = matches[0]
+                    df.at[pos, "ema_50"] = float(target_signal["ema50"])
+                    df.at[pos, "ema_200"] = float(target_signal["ema200"])
+                    if pos > 0 and target_signal.get("previous_ema50") is not None and target_signal.get("previous_ema200") is not None:
+                        df.at[pos - 1, "ema_50"] = float(target_signal["previous_ema50"])
+                        df.at[pos - 1, "ema_200"] = float(target_signal["previous_ema200"])
 
         # Detect all historical Golden Crosses in the dataset
         golden_crosses = find_all_golden_crosses(df, symbol=symbol, timeframe=timeframe)
@@ -167,6 +172,22 @@ class ChartDataProvider:
             "total_candles": len(df_sliced),
         }
 
+        crossover_info = None
+        if target_timestamp:
+            target_matches = df[df["timestamp"] == target_timestamp]
+            if not target_matches.empty:
+                t_row = target_matches.iloc[0]
+                crossover_info = {
+                    "timestamp": int(t_row["timestamp"]),
+                    "close": float(t_row["close"]),
+                    "open": float(t_row["open"]),
+                    "high": float(t_row["high"]),
+                    "low": float(t_row["low"]),
+                    "volume": float(t_row.get("volume", 0.0)),
+                    "ema50": float(t_row["ema_50"]) if pd.notna(t_row["ema_50"]) else None,
+                    "ema200": float(t_row["ema_200"]) if pd.notna(t_row["ema_200"]) else None,
+                }
+
         return {
             "symbol": symbol,
             "timeframe": timeframe.upper(),
@@ -175,5 +196,8 @@ class ChartDataProvider:
             "ema200": formatted_ema200,
             "cross_markers": markers,
             "latest": latest_info,
+            "target_timestamp": target_timestamp,
+            "crossover_candle": crossover_info,
+            "target_signal": target_signal,
             "df": df_sliced,  # Retain DataFrame for high-performance Matplotlib rendering
         }

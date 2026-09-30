@@ -66,12 +66,16 @@ def create_app(
             last_closed_str = dt.strftime("%d %b %Y • %H:%M UTC")
 
         telegram_status = "ONLINE" if telegram_notifier.is_configured else "TELEGRAM CONFIGURATION MISSING"
+        market_data_health = ws_manager.get_market_data_health()
 
         return {
             "mode": "LONG ONLY",
             "signal": "EMA50 CROSS ABOVE EMA200",
             "binance": "ONLINE",
             "websocket": "CONNECTED" if ws_manager.is_connected else "RECONNECTING",
+            "market_data": market_data_health["status"],
+            "last_kline_received_at": market_data_health["last_kline_received_at"],
+            "last_closed_1h_candle": last_closed_str,
             "database": "ONLINE",
             "telegram": telegram_status,
             "symbols_total": len(signal_engine.symbols),

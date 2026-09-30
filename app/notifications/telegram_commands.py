@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.charts.chart_theme import format_price
+from app.indicators.ema import enrich_candles_with_ema
 
 logger = logging.getLogger("nexora.telegram.commands")
 
@@ -61,6 +62,9 @@ async def build_dashboard_view(
     """Builds /dashboard system overview using live application state."""
     binance_status = "ONLINE" if (binance_client and await binance_client.check_connectivity()) else "ONLINE"
     ws_status = "CONNECTED" if (ws_manager and ws_manager.is_connected) else "DISCONNECTED"
+    market_data_status = (
+        ws_manager.get_market_data_health().get("status", "OFFLINE") if ws_manager else "OFFLINE"
+    )
     telegram_status = "ONLINE" if (telegram_notifier and telegram_notifier.is_configured) else "OFFLINE"
 
     db_status = "ONLINE"
@@ -99,6 +103,7 @@ async def build_dashboard_view(
         "SYSTEM\n"
         f"● Binance        {binance_status}\n"
         f"● WebSocket      {ws_status}\n"
+        f"● Market Data    {market_data_status}\n"
         f"● Telegram       {telegram_status}\n"
         f"● Database       {db_status}\n\n"
         "MARKET\n"
@@ -140,7 +145,8 @@ async def build_market_view(signal_engine: Any, ws_manager: Any) -> Tuple[str, D
     streams = len(ws_manager.symbols) if (ws_manager and ws_manager.symbols) else symbols_count
 
     now_utc = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    scanner_status = "ACTIVE" if (ws_manager and ws_manager.is_connected) else "INITIALIZING"
+    health = ws_manager.get_market_data_health() if ws_manager else {"status": "OFFLINE", "is_healthy": False}
+    scanner_status = health["status"]
 
     text = (
         "MARKET MONITOR\n"
@@ -260,26 +266,51 @@ async def build_symbol_view(
     is_init = (resolved in signal_engine.initialized_symbols) if signal_engine else False
     status_str = "● MONITORING" if is_init else "● INITIALIZING"
 
-    # Candle / EMA structure
-    candles = signal_engine.candles_history.get(resolved, []) if signal_engine else []
+    # Current structure always comes from the newest closed USD-M Futures REST
+    # frame. Do not silently present cached/in-memory values as current when REST
+    # is unavailable.
+    candles = []
+    if binance_client:
+        klines = await binance_client.get_klines(resolved, interval="1h", limit=250, only_closed=True)
+        if klines:
+            df = enrich_candles_with_ema(klines, 50, 200)
+            candles = df.to_dict(orient="records")
+
     ema_section = ""
     if candles and len(candles) >= 2:
         last_c = candles[-1]
+        prev_c = candles[-2]
         ema50 = last_c.get("ema_50")
         ema200 = last_c.get("ema_200")
+        prev_ema50 = prev_c.get("ema_50")
+        prev_ema200 = prev_c.get("ema_200")
+        close_price = last_c.get("close", 0.0)
+        ts = int(last_c.get("timestamp", 0))
+        dt_str = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).strftime("%d %b %Y • %H:%M UTC")
+
         if ema50 is not None and ema200 is not None and not (isinstance(ema50, float) and ema50 != ema50):
-            ema_section = f"EMA STRUCTURE\nEMA 50    {format_price(ema50)}\nEMA 200   {format_price(ema200)}\n\n"
-            if ema50 > ema200:
+            if prev_ema50 is not None and prev_ema200 is not None and prev_ema50 <= prev_ema200 and ema50 > ema200:
+                signal_val = "GOLDEN CROSS CONFIRMED"
+            elif ema50 > ema200:
                 signal_val = "BULLISH"
             elif ema50 < ema200:
                 signal_val = "BEARISH"
             else:
                 signal_val = "NEUTRAL"
-            ema_section += f"SIGNAL\n{signal_val}\n\n"
+
+            ema_section = (
+                "EMA STRUCTURE (1H CLOSED CANDLE)\n"
+                f"Time      {dt_str}\n"
+                f"Close     {format_price(close_price)}\n"
+                f"EMA 50    {format_price(ema50)}\n"
+                f"EMA 200   {format_price(ema200)}\n\n"
+                f"SIGNAL\n{signal_val}\n\n"
+            )
         else:
             ema_section = "EMA STRUCTURE\nEMA data unavailable.\n\n"
     else:
-        ema_section = "EMA STRUCTURE\nEMA data unavailable.\n\n"
+        ema_section = "CURRENT STRUCTURE (1H CLOSED CANDLE)\nBinance USD-M Futures market data unavailable.\n\n"
+        status_str = "● DATA STALE / NO MARKET DATA"
 
     # Last golden cross from DB
     last_cross = (await database.get_last_signal_for_symbol(resolved)) if database else None
@@ -405,6 +436,17 @@ async def build_status_view(
 
     aq_status = "RUNNING" if (alert_queue and alert_queue._running) else "STOPPED"
 
+    ws_health = ws_manager.get_market_data_health() if ws_manager else {
+        "status": "OFFLINE", "is_healthy": False, "total_klines_received": 0, "candles_closed_count": 0
+    }
+    market_data_status = ws_health.get("status", "OFFLINE")
+    total_klines = ws_health.get("total_klines_received", 0)
+    closed_candles = ws_health.get("candles_closed_count", 0)
+    last_kline_ts = ws_health.get("last_kline_received_at")
+    last_kline_str = datetime.fromtimestamp(last_kline_ts, tz=timezone.utc).strftime("%d %b %H:%M:%S UTC") if last_kline_ts else "NEVER"
+    last_closed_ts = ws_health.get("last_closed_candle_time")
+    last_closed_str = datetime.fromtimestamp(last_closed_ts / 1000, tz=timezone.utc).strftime("%d %b %H:%M UTC") if last_closed_ts else "NEVER"
+
     symbols_count = len(signal_engine.symbols) if signal_engine else 0
     connections = len(ws_manager._tasks) if (ws_manager and ws_manager._tasks) else ((symbols_count + 99) // 100 if symbols_count else 0)
     c429 = binance_client.rate_limit_429_count if binance_client else 0
@@ -426,11 +468,16 @@ async def build_status_view(
         "CORE\n"
         f"● Engine       {engine_status}\n"
         f"● WebSocket    {ws_status}\n"
+        f"● Market Data  {market_data_status}\n"
         f"● Database     {db_status}\n"
         f"● Alert Queue  {aq_status}\n\n"
         "BINANCE\n"
         f"Symbols        {symbols_count}\n"
         f"Connections    {connections}\n"
+        f"Total Klines   {total_klines}\n"
+        f"Last Kline     {last_kline_str}\n"
+        f"Closed Candles {closed_candles}\n"
+        f"Last Closed 1H {last_closed_str}\n"
         f"429 Errors     {c429}\n"
         f"418 Errors     {c418}\n"
         f"Reconnects     {reconnects}\n\n"

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import aiosqlite
 
 from app.persistence.models import SignalRecord, CachedCandle
+
+logger = logging.getLogger("nexora.database")
 
 
 class Database:
@@ -30,6 +33,8 @@ class Database:
                     signal_time_utc TEXT NOT NULL,
                     ema50 REAL NOT NULL,
                     ema200 REAL NOT NULL,
+                    previous_ema50 REAL,
+                    previous_ema200 REAL,
                     close_price REAL NOT NULL,
                     chart_image_path TEXT,
                     telegram_sent INTEGER NOT NULL DEFAULT 0,
@@ -45,6 +50,11 @@ class Database:
                 await db.execute("ALTER TABLE signals ADD COLUMN is_live INTEGER NOT NULL DEFAULT 0")
             except Exception:
                 pass  # column already exists
+            for column in ("previous_ema50", "previous_ema200"):
+                try:
+                    await db.execute(f"ALTER TABLE signals ADD COLUMN {column} REAL")
+                except Exception:
+                    pass  # column already exists
 
             await db.execute(
                 """
@@ -84,15 +94,36 @@ class Database:
 
     async def save_signal(self, signal: SignalRecord) -> int:
         """Inserts a new golden cross signal. Returns the signal id."""
+        # Section 5 & 10: Strict consistency check
+        invalid_previous = (
+            signal.previous_ema50 is not None
+            and signal.previous_ema200 is not None
+            and signal.previous_ema50 > signal.previous_ema200
+        )
+        if signal.timeframe.upper() != "1H" or signal.ema50 <= signal.ema200 or invalid_previous:
+            logger.error(
+                f"SIGNAL_VALIDATION_ERROR: Cannot save invalid 1H Golden Cross for {signal.symbol}: "
+                f"previous=({signal.previous_ema50}, {signal.previous_ema200}), "
+                f"current=({signal.ema50}, {signal.ema200}), candle={signal.candle_timestamp}"
+            )
+            return 0
+
         async with self._lock:
             async with aiosqlite.connect(self.db_path) as db:
                 cursor = await db.execute(
                     """
                     INSERT INTO signals (
                         symbol, timeframe, candle_timestamp, signal_time_utc,
-                        ema50, ema200, close_price, chart_image_path, telegram_sent, is_live
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ema50, ema200, previous_ema50, previous_ema200, close_price,
+                        chart_image_path, telegram_sent, is_live
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(symbol, timeframe, candle_timestamp) DO UPDATE SET
+                        signal_time_utc = excluded.signal_time_utc,
+                        ema50 = excluded.ema50,
+                        ema200 = excluded.ema200,
+                        previous_ema50 = coalesce(excluded.previous_ema50, signals.previous_ema50),
+                        previous_ema200 = coalesce(excluded.previous_ema200, signals.previous_ema200),
+                        close_price = excluded.close_price,
                         chart_image_path = coalesce(excluded.chart_image_path, signals.chart_image_path),
                         telegram_sent = max(signals.telegram_sent, excluded.telegram_sent),
                         is_live = max(signals.is_live, excluded.is_live)
@@ -105,6 +136,8 @@ class Database:
                         signal.signal_time_utc,
                         signal.ema50,
                         signal.ema200,
+                        signal.previous_ema50,
+                        signal.previous_ema200,
                         signal.close_price,
                         signal.chart_image_path,
                         1 if signal.telegram_sent else 0,
@@ -126,6 +159,25 @@ class Database:
         if not signals:
             return 0
 
+        valid_signals = []
+        for s in signals:
+            prior_valid = (
+                s.previous_ema50 is None
+                or s.previous_ema200 is None
+                or s.previous_ema50 <= s.previous_ema200
+            )
+            if s.timeframe.upper() == "1H" and s.ema50 > s.ema200 and prior_valid:
+                valid_signals.append(s)
+            else:
+                logger.error(
+                    f"SIGNAL_VALIDATION_ERROR: Skipping invalid historical signal for {s.symbol}: "
+                    f"previous=({s.previous_ema50}, {s.previous_ema200}), "
+                    f"current=({s.ema50}, {s.ema200}), candle={s.candle_timestamp}"
+                )
+
+        if not valid_signals:
+            return 0
+
         records = [
             (
                 s.symbol.upper(),
@@ -134,12 +186,14 @@ class Database:
                 s.signal_time_utc,
                 s.ema50,
                 s.ema200,
+                s.previous_ema50,
+                s.previous_ema200,
                 s.close_price,
                 s.chart_image_path,
                 1 if s.telegram_sent else 0,
                 0,  # is_live = 0 strictly for historical signals
             )
-            for s in signals
+            for s in valid_signals
         ]
 
         async with self._lock:
@@ -149,8 +203,9 @@ class Database:
                     """
                     INSERT INTO signals (
                         symbol, timeframe, candle_timestamp, signal_time_utc,
-                        ema50, ema200, close_price, chart_image_path, telegram_sent, is_live
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ema50, ema200, previous_ema50, previous_ema200, close_price,
+                        chart_image_path, telegram_sent, is_live
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(symbol, timeframe, candle_timestamp) DO NOTHING
                     """,
                     records,
@@ -179,7 +234,8 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT id, symbol, timeframe, candle_timestamp, signal_time_utc,
-                       ema50, ema200, close_price, chart_image_path, telegram_sent, is_live, created_at
+                       ema50, ema200, previous_ema50, previous_ema200, close_price,
+                       chart_image_path, telegram_sent, is_live, created_at
                 FROM signals
                 ORDER BY candle_timestamp DESC, id DESC
                 LIMIT ?
@@ -303,13 +359,31 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT id, symbol, timeframe, candle_timestamp, signal_time_utc,
-                       ema50, ema200, close_price, chart_image_path, telegram_sent, is_live
+                       ema50, ema200, previous_ema50, previous_ema200, close_price,
+                       chart_image_path, telegram_sent, is_live
                 FROM signals
                 WHERE symbol = ?
                 ORDER BY candle_timestamp DESC, id DESC
                 LIMIT 1
                 """,
                 (symbol.upper(),),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_signal_for_candle(self, symbol: str, timeframe: str, candle_timestamp: int) -> Optional[Dict[str, Any]]:
+        """Fetch the exact persisted event row used as chart event metadata."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT symbol, timeframe, candle_timestamp, ema50, ema200,
+                       previous_ema50, previous_ema200, close_price
+                FROM signals
+                WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?
+                LIMIT 1
+                """,
+                (symbol.upper(), timeframe.upper(), candle_timestamp),
             )
             row = await cursor.fetchone()
             return dict(row) if row else None
@@ -327,7 +401,8 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT id, symbol, timeframe, candle_timestamp, signal_time_utc,
-                       ema50, ema200, close_price, chart_image_path, telegram_sent, is_live, created_at
+                       ema50, ema200, previous_ema50, previous_ema200, close_price,
+                       chart_image_path, telegram_sent, is_live, created_at
                 FROM signals
                 ORDER BY candle_timestamp DESC, id DESC
                 LIMIT ? OFFSET ?
@@ -364,7 +439,8 @@ class Database:
             db.row_factory = aiosqlite.Row
             clast = await db.execute(
                 """
-                SELECT symbol, signal_time_utc, candle_timestamp, close_price, ema50, ema200, is_live
+                SELECT symbol, signal_time_utc, candle_timestamp, close_price, ema50, ema200,
+                       previous_ema50, previous_ema200, is_live
                 FROM signals
                 ORDER BY candle_timestamp DESC, id DESC
                 LIMIT 1
@@ -390,7 +466,8 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT id, symbol, timeframe, candle_timestamp, signal_time_utc,
-                       ema50, ema200, close_price, chart_image_path, telegram_sent, is_live
+                       ema50, ema200, previous_ema50, previous_ema200, close_price,
+                       chart_image_path, telegram_sent, is_live
                 FROM signals
                 WHERE candle_timestamp >= ?
                 ORDER BY candle_timestamp DESC, id DESC

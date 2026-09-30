@@ -266,10 +266,126 @@ class ChartRenderer:
             # -------------------------------------------------------------
             # HEADER & INFORMATION PANEL (NEXORA Terminal UI)
             # -------------------------------------------------------------
-            latest = chart_data.get("latest", {})
-            last_close = latest.get("close", df.iloc[-1]["close"])
-            ema50_val = latest.get("ema50", df.iloc[-1].get("ema_50", 0.0))
-            ema200_val = latest.get("ema200", df.iloc[-1].get("ema_200", 0.0))
+            target_ts = target_timestamp or chart_data.get("target_timestamp")
+            if timeframe.lower() != "1h":
+                logger.error("CHART_DATA_INCONSISTENCY: unsupported timeframe=%s symbol=%s", timeframe, symbol)
+                plt.close(fig)
+                return None
+
+            if target_ts is not None:
+                # 1. HISTORICAL GOLDEN CROSS EVENT CHART
+                match_indices = df.index[df["timestamp"] == target_ts].tolist()
+                if not match_indices:
+                    logger.error(
+                        f"CHART_DATA_INCONSISTENCY: Target timestamp {target_ts} not found in chart dataframe for {symbol}"
+                    )
+                    plt.close(fig)
+                    return None
+
+                target_pos = match_indices[0]
+                if target_pos < 1:
+                    logger.error(
+                        f"CHART_DATA_INCONSISTENCY: Insufficient prior candle to verify crossover at {target_ts} for {symbol}"
+                    )
+                    plt.close(fig)
+                    return None
+
+                curr_candle = df.iloc[target_pos]
+                prev_candle = df.iloc[target_pos - 1]
+
+                curr_ema50 = float(curr_candle.get("ema_50", 0.0))
+                curr_ema200 = float(curr_candle.get("ema_200", 0.0))
+                prev_ema50 = float(prev_candle.get("ema_50", 0.0))
+                prev_ema200 = float(prev_candle.get("ema_200", 0.0))
+                stored_event = chart_data.get("target_signal")
+                if stored_event and (stored_event.get("previous_ema50") is None or stored_event.get("previous_ema200") is None):
+                    logger.error(
+                        f"CHART_DATA_INCONSISTENCY: symbol={symbol}, timeframe={timeframe}, "
+                        f"crossover_timestamp={target_ts}, prev_ema50={prev_ema50}, "
+                        f"prev_ema200={prev_ema200}, current_ema50={curr_ema50}, current_ema200={curr_ema200}; "
+                        "stored signal lacks previous EMA values"
+                    )
+                    plt.close(fig)
+                    return None
+                if not np.isfinite([prev_ema50, prev_ema200, curr_ema50, curr_ema200]).all():
+                    logger.error(
+                        f"CHART_DATA_INCONSISTENCY: symbol={symbol}, timeframe={timeframe}, "
+                        f"crossover_timestamp={target_ts}, prev_ema50={prev_ema50}, "
+                        f"prev_ema200={prev_ema200}, current_ema50={curr_ema50}, current_ema200={curr_ema200}"
+                    )
+                    plt.close(fig)
+                    return None
+
+                # Section 7: Strict Consistency Validation
+                # Golden Cross definition: previous EMA50 <= previous EMA200 AND current EMA50 > current EMA200
+                is_valid_cross = (prev_ema50 <= prev_ema200) and (curr_ema50 > curr_ema200)
+                if not is_valid_cross:
+                    logger.error(
+                        f"CHART_DATA_INCONSISTENCY: symbol={symbol}, timeframe={timeframe}, "
+                        f"crossover_timestamp={target_ts}, prev_ema50={prev_ema50}, "
+                        f"prev_ema200={prev_ema200}, current_ema50={curr_ema50}, current_ema200={curr_ema200}"
+                    )
+                    plt.close(fig)
+                    return None  # FAIL CLOSED!
+
+                display_close = float(curr_candle["close"])
+                display_ema50 = curr_ema50
+                display_ema200 = curr_ema200
+                banner_text = "SIGNAL: EMA50 CROSS ABOVE EMA200   |   EVENT: GOLDEN CROSS CONFIRMED"
+                banner_color = "#00E676"
+                status_text = "STATUS: GOLDEN CROSS"
+                status_color = "#00E676"
+
+                dt_target = datetime.fromtimestamp(target_ts / 1000.0, tz=timezone.utc)
+                display_time_str = dt_target.strftime("%d %b %Y • %H:%M UTC")
+
+            else:
+                # 2. CURRENT MARKET OVERVIEW CHART (Strict Status Semantics)
+                last_pos = len(df) - 1
+                curr_candle = df.iloc[last_pos]
+                prev_candle = df.iloc[last_pos - 1] if last_pos >= 1 else curr_candle
+
+                curr_ema50 = float(curr_candle.get("ema_50", 0.0))
+                curr_ema200 = float(curr_candle.get("ema_200", 0.0))
+                prev_ema50 = float(prev_candle.get("ema_50", 0.0))
+                prev_ema200 = float(prev_candle.get("ema_200", 0.0))
+                if not np.isfinite([prev_ema50, prev_ema200, curr_ema50, curr_ema200]).all():
+                    logger.error(
+                        f"CHART_DATA_INCONSISTENCY: symbol={symbol}, timeframe={timeframe}, "
+                        f"crossover_timestamp={curr_candle.get('timestamp')}, prev_ema50={prev_ema50}, "
+                        f"prev_ema200={prev_ema200}, current_ema50={curr_ema50}, current_ema200={curr_ema200}"
+                    )
+                    plt.close(fig)
+                    return None
+
+                display_close = float(curr_candle["close"])
+                display_ema50 = curr_ema50
+                display_ema200 = curr_ema200
+
+                # Evaluate current candle EMA structure
+                if prev_ema50 <= prev_ema200 and curr_ema50 > curr_ema200:
+                    banner_text = "SIGNAL: EMA50 CROSS ABOVE EMA200   |   STATUS: GOLDEN CROSS CONFIRMED"
+                    banner_color = "#00E676"
+                    status_text = "STATUS: GOLDEN CROSS"
+                    status_color = "#00E676"
+                elif curr_ema50 > curr_ema200:
+                    banner_text = "MARKET OVERVIEW   |   CURRENT STRUCTURE: BULLISH (EMA50 > EMA200)"
+                    banner_color = "#00E676"
+                    status_text = "STATUS: BULLISH"
+                    status_color = "#00E676"
+                elif curr_ema50 < curr_ema200:
+                    banner_text = "MARKET OVERVIEW   |   CURRENT STRUCTURE: BEARISH (EMA50 < EMA200)"
+                    banner_color = "#FF5252"
+                    status_text = "STATUS: BEARISH"
+                    status_color = "#FF5252"
+                else:
+                    banner_text = "MARKET OVERVIEW   |   CURRENT STRUCTURE: NEUTRAL (EMA50 == EMA200)"
+                    banner_color = "#FFD600"
+                    status_text = "STATUS: NEUTRAL"
+                    status_color = "#FFD600"
+
+                dt_last = datetime.fromtimestamp(int(curr_candle["timestamp"]) / 1000.0, tz=timezone.utc)
+                display_time_str = dt_last.strftime("%d %b %Y • %H:%M UTC")
 
             # Title & Subtitle (Left top)
             fig.text(0.05, 0.955, "NEXORA EMA CROSS", color="#FFFFFF", fontsize=18, fontweight="heavy", fontfamily="sans-serif")
@@ -286,15 +402,14 @@ class ChartRenderer:
             fig.text(
                 0.05,
                 0.895,
-                "SIGNAL: EMA50 CROSS ABOVE EMA200   |   STATUS: GOLDEN CROSS CONFIRMED",
-                color="#00E676",
+                banner_text,
+                color=banner_color,
                 fontsize=11,
                 fontweight="bold",
             )
 
             # Compact Info Panel Box (Right top)
-            # Position: x=0.62, y=0.88, width=0.33, height=0.09
-            ax_info = fig.add_axes([0.62, 0.885, 0.33, 0.095], facecolor=THEME.bg_panel)
+            ax_info = fig.add_axes([0.58, 0.885, 0.37, 0.095], facecolor=THEME.bg_panel)
             for spine in ax_info.spines.values():
                 spine.set_color(THEME.border_color)
                 spine.set_linewidth(1.0)
@@ -304,18 +419,22 @@ class ChartRenderer:
             # Info panel text rows
             # Left column: Symbol, Close, Candle
             ax_info.text(0.04, 0.72, f"SYMBOL: {symbol}", color="#FFFFFF", fontsize=10, fontweight="bold")
-            ax_info.text(0.04, 0.40, f"CLOSE: {format_price(last_close)}", color="#E2E8F0", fontsize=10)
+            ax_info.text(0.04, 0.40, f"CLOSE: {format_price(display_close)}", color="#E2E8F0", fontsize=10)
             ax_info.text(0.04, 0.12, "CANDLE: CLOSED", color="#00E676", fontsize=9.5, fontweight="bold")
 
-            # Mid column: EMA50 & EMA200
-            ax_info.text(0.42, 0.72, f"EMA 50: {format_price(ema50_val)}", color=THEME.ema50_color, fontsize=10, fontweight="bold")
-            ax_info.text(0.42, 0.40, f"EMA 200: {format_price(ema200_val)}", color=THEME.ema200_color, fontsize=10, fontweight="bold")
+            # Mid column: EMA50 & EMA200 & Status
+            ax_info.text(0.38, 0.72, f"EMA 50: {format_price(display_ema50)}", color=THEME.ema50_color, fontsize=10, fontweight="bold")
+            ax_info.text(0.38, 0.40, f"EMA 200: {format_price(display_ema200)}", color=THEME.ema200_color, fontsize=10, fontweight="bold")
+            ax_info.text(0.38, 0.12, status_text, color=status_color, fontsize=9.5, fontweight="bold")
 
-            # Right column: Signal Time
-            ax_info.text(0.42, 0.12, f"TIME: {signal_time_str}", color=THEME.subtitle_color, fontsize=9)
+            # Right column: Time
+            ax_info.text(0.72, 0.68, f"TF: {timeframe}", color="#FFFFFF", fontsize=9, fontweight="bold")
+            ax_info.text(0.72, 0.40, "TIME (UTC):", color=THEME.subtitle_color, fontsize=8.5)
+            short_time = display_time_str.split(" • ")[-1] if " • " in display_time_str else display_time_str
+            ax_info.text(0.72, 0.12, short_time, color="#FFFFFF", fontsize=9, fontweight="bold")
 
             # Save PNG
-            timestamp_ms = target_timestamp or int(latest.get("timestamp", int(time.time() * 1000)))
+            timestamp_ms = target_ts or int(df.iloc[-1]["timestamp"])
             if not custom_filename:
                 filename = f"{symbol}_{timeframe}_{timestamp_ms}.png"
             else:

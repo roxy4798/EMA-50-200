@@ -616,16 +616,29 @@ class TelegramNotifier:
                 force_fresh=True,
             )
 
-            # 2. Render chart image in thread executor to prevent event-loop blocking
+            # 2. Render chart image in thread executor to prevent event-loop blocking (Overview Mode: target_timestamp=None)
             loop = asyncio.get_running_loop()
             chart_path = await loop.run_in_executor(
                 None,
                 self.chart_renderer.render_golden_cross_chart,
                 chart_data,
+                None,
             )
 
             if chart_path and os.path.isfile(chart_path):
-                caption = f"{symbol} • 1H Golden Cross Chart"
+                latest = chart_data.get("latest", {})
+                e50 = latest.get("ema50")
+                e200 = latest.get("ema200")
+                if e50 is not None and e200 is not None:
+                    if e50 > e200:
+                        struct = "BULLISH"
+                    elif e50 < e200:
+                        struct = "BEARISH"
+                    else:
+                        struct = "NEUTRAL"
+                else:
+                    struct = "1H"
+                caption = f"{symbol} • 1H Market Overview ({struct})"
                 sent = await self.send_photo(chat_id, chart_path, caption=caption)
                 if not sent:
                     await self.send_message(chat_id, f"Chart generated for {symbol} but failed to deliver image.")

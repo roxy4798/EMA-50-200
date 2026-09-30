@@ -35,6 +35,8 @@ def test_chart_renderer_generates_valid_1600x900_png(tmp_path):
         h = max(o, c) + 30
         l = min(o, c) - 30
         price = c
+        ema50_val = (price + 20) if i >= 80 else (price - 50)
+        ema200_val = (price - 20) if i >= 80 else (price - 10)
         rows.append({
             "timestamp": ts,
             "open": o,
@@ -42,8 +44,8 @@ def test_chart_renderer_generates_valid_1600x900_png(tmp_path):
             "low": l,
             "close": c,
             "volume": 1000.0,
-            "ema_50": price - 20,
-            "ema_200": price - 50,
+            "ema_50": ema50_val,
+            "ema_200": ema200_val,
         })
 
     df = pd.DataFrame(rows)

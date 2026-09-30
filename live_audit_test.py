@@ -142,6 +142,20 @@ async def run_live_audit() -> None:
     # 4. CHART & MARKER AUDIT
     # -------------------------------------------------------------
     print("\n[TEST 4] High-Resolution (1600x900) Chart Rendering & Marker Audit...")
+    # Persist the detected event first so the chart uses the exact canonical
+    # crossover and previous-candle EMA values produced by the same detector.
+    await test_db.save_signal(SignalRecord(
+        id=None,
+        symbol=found_cross.symbol,
+        timeframe=found_cross.timeframe,
+        candle_timestamp=found_cross.candle_timestamp,
+        signal_time_utc=found_cross.signal_time_utc,
+        ema50=found_cross.ema50,
+        ema200=found_cross.ema200,
+        close_price=found_cross.close_price,
+        previous_ema50=found_cross.previous_ema50,
+        previous_ema200=found_cross.previous_ema200,
+    ))
     chart_data = await chart_provider.get_chart_data(target_sym, limit=150, target_timestamp=found_cross.candle_timestamp, force_fresh=True)
     assert len(chart_data["candles"]) >= 60, "Candles in chart window insufficient"
     assert len(chart_data["cross_markers"]) >= 1, "Expected at least 1 Golden Cross marker in window"
@@ -176,6 +190,8 @@ async def run_live_audit() -> None:
         ema50=found_cross.ema50,
         ema200=found_cross.ema200,
         close_price=found_cross.close_price,
+        previous_ema50=found_cross.previous_ema50,
+        previous_ema200=found_cross.previous_ema200,
     )
     id1 = await test_db.save_signal(sig_rec)
     has1 = await test_db.has_signal(found_cross.symbol, found_cross.timeframe, found_cross.candle_timestamp)
