@@ -112,8 +112,8 @@ async def run_live_audit() -> None:
     # Search for real cross in recent 500 candles across major symbols
     found_cross: Optional[GoldenCrossSignal] = None
     target_sym = ""
-    for s in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"]:
-        klines = await client.get_klines(s, interval="1h", limit=500, only_closed=True)
+    for s in ["ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "BTCUSDT"]:
+        klines = await client.get_klines(s, interval="1h", limit=250, only_closed=True)
         if len(klines) >= 200:
             df = enrich_candles_with_ema(klines, 50, 200)
             crosses = find_all_golden_crosses(df, s, "1h")
@@ -142,11 +142,13 @@ async def run_live_audit() -> None:
     # 4. CHART & MARKER AUDIT
     # -------------------------------------------------------------
     print("\n[TEST 4] High-Resolution (1600x900) Chart Rendering & Marker Audit...")
-    chart_data = await chart_provider.get_chart_data(target_sym, limit=150, target_timestamp=found_cross.candle_timestamp)
+    chart_data = await chart_provider.get_chart_data(target_sym, limit=150, target_timestamp=found_cross.candle_timestamp, force_fresh=True)
     assert len(chart_data["candles"]) >= 60, "Candles in chart window insufficient"
     assert len(chart_data["cross_markers"]) >= 1, "Expected at least 1 Golden Cross marker in window"
 
-    marker = chart_data["cross_markers"][0]
+    matching_markers = [m for m in chart_data["cross_markers"] if m["timestamp_ms"] == found_cross.candle_timestamp]
+    assert len(matching_markers) >= 1, "Marker timestamp must EXACTLY match candle timestamp!"
+    marker = matching_markers[0]
     print(f"Marker Text:      {marker['text']}")
     print(f"Marker Time ms:   {marker['timestamp_ms']}")
     assert marker["timestamp_ms"] == found_cross.candle_timestamp, "Marker timestamp must EXACTLY match candle timestamp!"

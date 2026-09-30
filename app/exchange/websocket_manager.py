@@ -18,7 +18,7 @@ class BinanceWebSocketManager:
         timeframe: str = "1h",
         on_candle_closed: Optional[Callable[[str, Dict], Coroutine]] = None,
     ) -> None:
-        self.base_ws_url = base_ws_url.rstrip("/")
+        self.base_ws_url = base_ws_url.rstrip("/").removesuffix("/ws")
         self.timeframe = timeframe
         self.on_candle_closed = on_candle_closed
         self.symbols: List[str] = []
@@ -62,11 +62,15 @@ class BinanceWebSocketManager:
         self._tasks.clear()
         self._active_connections = 0
 
+    def get_stream_url(self, symbols: List[str]) -> str:
+        base_url = self.base_ws_url.rstrip("/").removesuffix("/ws")
+        stream_names = [f"{s}@kline_{self.timeframe}" for s in symbols]
+        stream_param = "/".join(stream_names)
+        return f"{base_url}/stream?streams={stream_param}"
+
     async def _run_batch_loop(self, batch_idx: int, batch_symbols: List[str]) -> None:
         backoff = 2
-        stream_names = [f"{s}@kline_{self.timeframe}" for s in batch_symbols]
-        stream_param = "/".join(stream_names)
-        ws_url = f"{self.base_ws_url}/stream?streams={stream_param}"
+        ws_url = self.get_stream_url(batch_symbols)
 
         while self._running:
             try:

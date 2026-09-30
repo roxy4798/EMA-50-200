@@ -12,7 +12,7 @@ from pydantic import Field
 class Settings(BaseSettings):
     # Binance USD-M Futures
     binance_futures_base_url: str = Field(default="https://fapi.binance.com")
-    binance_ws_base_url: str = Field(default="wss://fstream.binance.com/ws")
+    binance_ws_base_url: str = Field(default="wss://fstream.binance.com")
     timeframe: str = Field(default="1h")
     ema_fast: int = Field(default=50)
     ema_slow: int = Field(default=200)
