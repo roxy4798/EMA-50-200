@@ -252,8 +252,8 @@ async def test_live_vs_historical_signals_separation(tmp_path):
     }
     # Reset EMA so it crosses on this candle
     engine.candles_history["BTCUSDT"] = [
-        {"timestamp": ts_live - (250 - i) * 3600000, "open": 98.0, "high": 99.0, "low": 97.0, "close": 98.0, "volume": 10.0}
-        for i in range(250)
+        {"timestamp": ts_live - (1000 - i) * 3600000, "open": 98.0, "high": 99.0, "low": 97.0, "close": 98.0, "volume": 10.0}
+        for i in range(1000)
     ]
     # Feed closed candle
     live_sig = await engine.handle_closed_candle("BTCUSDT", live_candle)
@@ -284,7 +284,7 @@ async def test_candle_limit_sync_and_rest_pacing(tmp_path):
     from unittest.mock import AsyncMock
     from app.config import settings
 
-    assert settings.candle_limit == 250
+    assert settings.candle_limit == 1000
     assert settings.candle_limit >= settings.ema_slow
 
     db_path = str(tmp_path / "test_pacing.db")
@@ -303,13 +303,13 @@ async def test_candle_limit_sync_and_rest_pacing(tmp_path):
         alert_queue=queue,
         candle_limit=settings.candle_limit,
     )
-    assert engine.candle_limit == 250
+    assert engine.candle_limit == 1000
 
     call_timestamps = []
 
-    async def mock_get_klines(sym, interval="1h", limit=250, only_closed=True, **kwargs):
+    async def mock_get_klines(sym, interval="1h", limit=1000, only_closed=True, **kwargs):
         call_timestamps.append(time.monotonic())
-        # Return 250 fake candles
+        # Return 1000 fake candles
         return [
             {
                 "timestamp": 1700000000000 + i * 3600000,

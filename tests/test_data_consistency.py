@@ -41,7 +41,7 @@ from app.persistence.models import SignalRecord
 from app.notifications.telegram_commands import build_symbol_view, build_status_view
 
 
-def _create_synthetic_candles(num_candles: int = 250, start_price: float = 100.0) -> list[dict]:
+def _create_synthetic_candles(num_candles: int = 1000, start_price: float = 100.0) -> list[dict]:
     """Generates synthetic 1H candlestick sequence."""
     base_ts = 1790000000000
     candles = []
@@ -204,7 +204,7 @@ async def test_6_symbol_and_chart_current_ema_values_consistent(tmp_path):
     await db.init()
 
     # Pre-cache SAFEUSDT candles
-    candles = _create_synthetic_candles(250, start_price=0.12)
+    candles = _create_synthetic_candles(1000, start_price=0.12)
     # Deterministic declining USD-M frame gives a bearish structure.
     for i, candle in enumerate(candles):
         candle["close"] = 0.12 - i * 0.0001

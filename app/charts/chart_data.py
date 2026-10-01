@@ -47,15 +47,15 @@ class ChartDataProvider:
         timeframe = "1h"
         candles: List[Dict[str, Any]] = []
 
-        # If target_timestamp is specified, fetch historical window around target
+        # Fetch converged dataset of 1000 closed candles
+        fetch_limit = 1000
         if target_timestamp:
-            # Fetch 300 candles ending ~35 candles after target_timestamp to give full context
+            # Fetch 1000 candles ending ~35 candles after target_timestamp for converged EMA warmup
             end_req_time = target_timestamp + (35 * 3600 * 1000)
             candles = await self.binance_client.get_klines(
-                symbol, interval=timeframe, limit=300, only_closed=True, end_time=end_req_time
+                symbol, interval=timeframe, limit=fetch_limit, only_closed=True, end_time=end_req_time
             )
         else:
-            fetch_limit = 250
             candles = await self.binance_client.get_klines(symbol, interval=timeframe, limit=fetch_limit, only_closed=True)
             if candles:
                 df = enrich_candles_with_ema(candles, fast_period=50, slow_period=200)
@@ -74,24 +74,14 @@ class ChartDataProvider:
                 "latest": {},
             }
 
-        # Ensure EMA is calculated across the full dataset
+        # Calculate EMA across the converged 1000-candle dataset
         df = enrich_candles_with_ema(candles, fast_period=50, slow_period=200)
 
-        # Reuse the exact stored EMA pair for recorded historical signal charts.
-        # This prevents a different REST window/EMA seed from changing the event
-        # values displayed in its panel.
+        # Retrieve stored signal record for metadata reference without overriding
+        # the objectively calculated EMA values from the converged candle dataset.
         target_signal = None
         if target_timestamp:
             target_signal = await self.database.get_signal_for_candle(symbol, timeframe, target_timestamp)
-            if target_signal:
-                matches = df.index[df["timestamp"] == target_timestamp].tolist()
-                if matches:
-                    pos = matches[0]
-                    df.at[pos, "ema_50"] = float(target_signal["ema50"])
-                    df.at[pos, "ema_200"] = float(target_signal["ema200"])
-                    if pos > 0 and target_signal.get("previous_ema50") is not None and target_signal.get("previous_ema200") is not None:
-                        df.at[pos - 1, "ema_50"] = float(target_signal["previous_ema50"])
-                        df.at[pos - 1, "ema_200"] = float(target_signal["previous_ema200"])
 
         # Detect all historical Golden Crosses in the dataset
         golden_crosses = find_all_golden_crosses(df, symbol=symbol, timeframe=timeframe)
@@ -200,4 +190,5 @@ class ChartDataProvider:
             "crossover_candle": crossover_info,
             "target_signal": target_signal,
             "df": df_sliced,  # Retain DataFrame for high-performance Matplotlib rendering
+            "df_full": df,    # Converged 1000-candle dataset for independent canonical validation
         }

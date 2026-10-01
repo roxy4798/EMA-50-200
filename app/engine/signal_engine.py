@@ -30,7 +30,7 @@ class SignalEngine:
         timeframe: str = "1h",
         fast_period: int = 50,
         slow_period: int = 200,
-        candle_limit: int = 250,
+        candle_limit: int = 1000,
     ) -> None:
         self.binance_client = binance_client
         self.database = database
@@ -38,8 +38,8 @@ class SignalEngine:
         self.timeframe = timeframe.lower()
         if self.timeframe != "1h":
             raise ValueError("NEXORA SignalEngine supports the 1h timeframe only")
-        if fast_period != 50 or slow_period != 200 or candle_limit != 250:
-            raise ValueError("NEXORA canonical frame is fixed at EMA50/EMA200 with 250 closed 1H candles")
+        if fast_period != 50 or slow_period != 200 or candle_limit != 1000:
+            raise ValueError("NEXORA canonical frame is fixed at EMA50/EMA200 with 1000 closed 1H candles")
         self.fast_period = fast_period
         self.slow_period = slow_period
         self.candle_limit = candle_limit
@@ -190,8 +190,8 @@ class SignalEngine:
             df = enrich_candles_with_ema(history, self.fast_period, self.slow_period)
             self.candles_history[symbol] = df.to_dict(orient="records")
 
-            # Use the same fixed 250 closed-candle window as current chart and
-            # /symbol views; never evaluate a signal from a shorter EMA seed.
+            # Canonical requirement: require at least 1000 closed candles for full EMA200
+            # convergence. If history < 1000, NO SIGNAL is evaluated (no short fallback).
             signal = None
             if len(df) >= self.candle_limit:
                 signal = detect_golden_cross(
@@ -200,6 +200,11 @@ class SignalEngine:
                     timeframe=self.timeframe,
                     fast_col=f"ema_{self.fast_period}",
                     slow_col=f"ema_{self.slow_period}",
+                )
+            else:
+                logger.debug(
+                    "INSUFFICIENT_HISTORY: %s has %d/%d closed candles. No signal evaluated.",
+                    symbol, len(df), self.candle_limit,
                 )
 
         if signal:

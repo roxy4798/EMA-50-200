@@ -271,7 +271,7 @@ async def build_symbol_view(
     # is unavailable.
     candles = []
     if binance_client:
-        klines = await binance_client.get_klines(resolved, interval="1h", limit=250, only_closed=True)
+        klines = await binance_client.get_klines(resolved, interval="1h", limit=1000, only_closed=True)
         if klines:
             df = enrich_candles_with_ema(klines, 50, 200)
             candles = df.to_dict(orient="records")

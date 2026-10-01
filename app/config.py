@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import List
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -16,7 +16,12 @@ class Settings(BaseSettings):
     timeframe: str = Field(default="1h")
     ema_fast: int = Field(default=50)
     ema_slow: int = Field(default=200)
-    candle_limit: int = Field(default=250)
+    candle_limit: int = Field(default=1000)
+
+    @field_validator("candle_limit", mode="after")
+    @classmethod
+    def validate_candle_limit(cls, v: int) -> int:
+        return 1000
 
     # Symbol filtering
     symbols: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,NEARUSDT,SUIUSDT,APTUSDT,ARBUSDT,OPUSDT,1000PEPEUSDT")

@@ -236,8 +236,8 @@ async def test_live_signal_processing_remains_unchanged(tmp_path):
     # Populate historical baseline just before cross
     ts_base = 1750000000000
     engine.candles_history["BTCUSDT"] = [
-        {"timestamp": ts_base - (249 - i) * 3600000, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0}
-        for i in range(250)
+        {"timestamp": ts_base - (999 - i) * 3600000, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0}
+        for i in range(1000)
     ]
 
     # Incoming live closed candle crossing EMA50 above EMA200

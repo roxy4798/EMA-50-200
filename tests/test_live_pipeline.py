@@ -52,6 +52,10 @@ async def test_full_live_pipeline_e2e(tmp_path):
 
     # 2. Setup Client & Data Provider
     client = BinanceFuturesClient()
+    async def mock_get_klines(sym, interval="1h", limit=1000, **kwargs):
+        hist = engine.candles_history.get(sym, [])
+        return [dict(c) for c in hist[-limit:]]
+    client.get_klines = AsyncMock(side_effect=mock_get_klines)
     chart_data = ChartDataProvider(client, db)
     
     # 3. Setup Chart Renderer (1600x900 PNG)
@@ -75,8 +79,8 @@ async def test_full_live_pipeline_e2e(tmp_path):
     # 7. Seed historical candles so that EMA 50 is just below EMA 200 before the trigger candle
     base_ts = 1790000000000
     seed_candles = []
-    # Generate 160 candles where EMA50 stays slightly below EMA200
-    for i in range(250):
+    # Generate 1000 candles where EMA50 stays slightly below EMA200
+    for i in range(1000):
         ts = base_ts + i * 3600_000
         seed_candles.append({
             "timestamp": ts,
@@ -90,7 +94,7 @@ async def test_full_live_pipeline_e2e(tmp_path):
     engine.candles_history[symbol] = seed_candles
 
     # 8. STEP 1 & 2: Simulate WebSocket closed candle message
-    trigger_ts = base_ts + 250 * 3600_000
+    trigger_ts = base_ts + 1000 * 3600_000
     ws_candle_event = {
         "timestamp": trigger_ts,
         "open": 50000.0,

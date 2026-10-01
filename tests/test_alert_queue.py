@@ -58,29 +58,31 @@ async def test_alert_queue_processing(tmp_path):
         ema50=signal.ema50,
         ema200=signal.ema200,
         close_price=signal.close_price,
+        previous_ema50=signal.previous_ema50,
+        previous_ema200=signal.previous_ema200,
     ))
 
-    # Seed cached candles so worker does not have to call live Binance
-    base_ts = 1700000000000
-    seed_candles = [
-        {
-            "timestamp": base_ts + i * 3600000,
-            "open": 64000.0,
-            "high": 65500.0,
-            "low": 63900.0,
-            "close": 65000.0,
+    from unittest.mock import AsyncMock
+    target_ts = signal.candle_timestamp
+    # Generate 1000 candles leading up to target_ts with a valid Golden Cross
+    mock_candles = []
+    for i in range(1000):
+        t = target_ts - (999 - i) * 3600000
+        mock_candles.append({
+            "timestamp": t,
+            "open": 50000.0 if i < 999 else 60000.0,
+            "high": 50500.0 if i < 999 else 71000.0,
+            "low": 49500.0 if i < 999 else 59000.0,
+            "close": 50000.0 if i < 999 else 70000.0,
             "volume": 100.0,
-            "ema_50": 64500.0,
-            "ema_200": 64000.0,
-        }
-        for i in range(120)
-    ]
-    await db.cache_candles(seed_candles, "BTCUSDT", "1h")
+            "close_time": t + 3599999,
+        })
+    binance_client.get_klines = AsyncMock(return_value=mock_candles)
 
     # Enqueue
     await queue.enqueue(sig_id, signal)
     # Wait for queue to be processed
-    for _ in range(20):
+    for _ in range(30):
         if queue.total_processed >= 1:
             break
         await asyncio.sleep(0.1)

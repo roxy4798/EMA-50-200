@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional, Tuple
 from app.charts.chart_data import ChartDataProvider
 from app.charts.chart_renderer import ChartRenderer
@@ -68,10 +69,10 @@ class AlertQueue:
                 await asyncio.sleep(0.5)
 
     async def _process_alert(self, signal_id: int, signal: GoldenCrossSignal) -> None:
-        """Processes a single alert: renders chart, sends telegram, updates database."""
+        """Processes a single alert: validates canonical cross on 1000 candles, renders chart, sends telegram, updates database."""
         chart_path: Optional[str] = None
         try:
-            # 1. Fetch centered chart data
+            # 1. Fetch centered chart data using 1000 closed candles from REST
             chart_data = await self.chart_data_provider.get_chart_data(
                 symbol=signal.symbol,
                 timeframe=signal.timeframe.lower(),
@@ -80,7 +81,47 @@ class AlertQueue:
                 force_fresh=True,
             )
 
-            # 2. Render chart image in thread executor to prevent event-loop blocking
+            # 2. Independent Canonical Fail-Closed Validation Guard:
+            # Verify the crossover event strictly holds on the converged 1000-candle dataset.
+            df = chart_data.get("df_full")
+            if df is None:
+                df = chart_data.get("df")
+            if df is None or len(df) < 1000:
+                logger.error(
+                    f"ALERT_ABORTED_FAIL_CLOSED: Insufficient candle data for {signal.symbol} "
+                    f"({0 if df is None else len(df)} < 1000). Alert dropped."
+                )
+                self.total_failed += 1
+                return
+
+            df = df.reset_index(drop=True)
+            target_ts = signal.candle_timestamp
+            match_indices = df.index[df["timestamp"] == target_ts].tolist()
+            if not match_indices or match_indices[0] < 1:
+                logger.error(f"ALERT_ABORTED_FAIL_CLOSED: Target timestamp {target_ts} not found or lacks prior candle for {signal.symbol}. Alert dropped.")
+                self.total_failed += 1
+                return
+
+            target_pos = match_indices[0]
+            curr_candle = df.iloc[target_pos]
+            prev_candle = df.iloc[target_pos - 1]
+
+            curr_ema50 = float(curr_candle.get("ema_50", 0.0))
+            curr_ema200 = float(curr_candle.get("ema_200", 0.0))
+            prev_ema50 = float(prev_candle.get("ema_50", 0.0))
+            prev_ema200 = float(prev_candle.get("ema_200", 0.0))
+
+            is_valid_canonical_cross = (prev_ema50 <= prev_ema200) and (curr_ema50 > curr_ema200)
+            if not is_valid_canonical_cross:
+                logger.error(
+                    f"ALERT_ABORTED_FAIL_CLOSED: {signal.symbol} at {target_ts} failed independent canonical "
+                    f"1000-candle validation (prev: {prev_ema50:.6f} vs {prev_ema200:.6f}, "
+                    f"curr: {curr_ema50:.6f} vs {curr_ema200:.6f}). Alert dropped."
+                )
+                self.total_failed += 1
+                return
+
+            # 3. Render chart image in thread executor
             loop = asyncio.get_running_loop()
             chart_path = await loop.run_in_executor(
                 None,
@@ -88,11 +129,17 @@ class AlertQueue:
                 chart_data,
                 signal.candle_timestamp,
             )
-        except Exception as e:
-            logger.error(f"CHART_RENDER_ERROR: Worker failed rendering for {signal.symbol}: {e}")
-            chart_path = None
+            if not chart_path or not os.path.isfile(chart_path):
+                logger.error(f"ALERT_ABORTED_FAIL_CLOSED: Chart generation failed for {signal.symbol}. Alert dropped.")
+                self.total_failed += 1
+                return
 
-        # 3. Deliver via Telegram (even if chart rendering returned None)
+        except Exception as e:
+            logger.error(f"ALERT_PROCESSING_ERROR: Failed validating/rendering for {signal.symbol}: {e}", exc_info=True)
+            self.total_failed += 1
+            return
+
+        # 4. Deliver via Telegram only after all fail-closed guards passed
         telegram_sent = False
         try:
             telegram_sent = await self.telegram_notifier.send_golden_cross_alert(
@@ -102,7 +149,7 @@ class AlertQueue:
         except Exception as e:
             logger.error(f"Failed delivering Telegram alert for {signal.symbol}: {e}")
 
-        # 4. Update database delivery state
+        # 5. Update database delivery state
         try:
             await self.database.update_signal_delivery(
                 signal_id=signal_id,
@@ -113,4 +160,4 @@ class AlertQueue:
             logger.error(f"Failed updating delivery record for signal {signal_id}: {e}")
 
         self.total_processed += 1
-        logger.info(f"Alert processing complete for {signal.symbol} (Chart: {'OK' if chart_path else 'FAILED'}, Telegram: {telegram_sent})")
+        logger.info(f"Alert processing complete for {signal.symbol} (Chart: OK, Telegram: {telegram_sent})")
