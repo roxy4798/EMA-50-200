@@ -161,29 +161,89 @@ class BinanceFuturesClient:
             if not only_closed:
                 return candles[-limit:]
 
-            # A first page capped at 1000 can contain the current open candle,
-            # leaving one fewer closed row than requested. Backfill only the
-            # exact shortfall, without crossing an explicit start_time bound.
+            # Filter to closed candles only and collect into a timestamp-keyed
+            # dict for automatic deduplication.
             now_ms = int(time.time() * 1000)
-            by_timestamp = {
+            by_timestamp: Dict[int, Dict[str, Any]] = {
                 int(c["timestamp"]): c
                 for c in candles
                 if int(c["close_time"]) < now_ms
             }
-            if len(by_timestamp) < limit and candles and start_time is None:
-                earliest_timestamp = min(int(c["timestamp"]) for c in candles)
+
+            # Paginate backward to fill the deficit.  The initial Binance
+            # response is capped at 1000 rows.  When it contains the current
+            # open candle we lose one closed row, but the real issue is that
+            # 1000 rows is the hard Binance cap -- if a caller needs 1000
+            # *closed* candles the open candle eats one slot.  We paginate
+            # backward (using endTime) to collect the shortfall.
+            #
+            # Stop conditions:
+            #   - collected >= limit closed candles
+            #   - explicit start_time was provided (no backfill across caller bounds)
+            #   - last page returned < 1000 rows (Binance history exhausted)
+            #   - safety cap of MAX_BACKFILL_PAGES reached
+            #
+            # Rate-limit handling:
+            #   Each backfill page is retried up to MAX_RETRIES_PER_PAGE times
+            #   if a 429/418 is received.  Before each retry we sleep for the
+            #   Retry-After period (capped at MAX_RATE_LIMIT_WAIT_S).  If all
+            #   retries are exhausted the loop breaks and returns partial
+            #   results (fail-closed: SignalEngine rejects <1000).
+            MAX_BACKFILL_PAGES = 3
+            MAX_RETRIES_PER_PAGE = 2
+            MAX_RATE_LIMIT_WAIT_S = 30
+            last_page_size = len(raw_data)
+
+            for _ in range(MAX_BACKFILL_PAGES):
+                if len(by_timestamp) >= limit:
+                    break
+                if start_time is not None:
+                    break
+                if last_page_size < 1000:
+                    # Binance returned fewer than 1000 rows -- no older data.
+                    break
+
+                earliest_timestamp = min(by_timestamp) if by_timestamp else (
+                    min(int(c["timestamp"]) for c in candles) if candles else None
+                )
+                if earliest_timestamp is None:
+                    break
+
                 backfill_params = {
                     "symbol": symbol.upper(),
                     "interval": interval,
-                    "limit": min(limit - len(by_timestamp), 1000),
+                    "limit": 1000,
                     "endTime": earliest_timestamp - 1,
                 }
-                backfill = await fetch_page(backfill_params)
-                if backfill is None:
-                    return []
-                for candle in parse_candles(backfill):
+
+                # Fetch with bounded rate-limit retry.
+                backfill_raw = None
+                for _attempt in range(MAX_RETRIES_PER_PAGE):
+                    pause_remaining = self._pause_until - time.time()
+                    if pause_remaining > 0:
+                        if pause_remaining > MAX_RATE_LIMIT_WAIT_S:
+                            logger.warning(
+                                f"Backfill pause {pause_remaining:.0f}s exceeds "
+                                f"{MAX_RATE_LIMIT_WAIT_S}s cap for {symbol} — giving up"
+                            )
+                            break
+                        await asyncio.sleep(pause_remaining)
+                    backfill_raw = await fetch_page(backfill_params)
+                    if backfill_raw is not None:
+                        break
+                    # fetch_page returned None → rate-limited or HTTP error.
+                    # _check_rate_limit already updated _pause_until with
+                    # Retry-After; the next iteration will honour the wait.
+
+                if backfill_raw is None:
+                    # All retries exhausted — return what we have (fail-closed).
+                    break
+                last_page_size = len(backfill_raw)
+                if last_page_size == 0:
+                    break
+                for candle in parse_candles(backfill_raw):
                     if int(candle["close_time"]) < now_ms:
-                        by_timestamp[int(candle["timestamp"])] = candle
+                        by_timestamp.setdefault(int(candle["timestamp"]), candle)
 
             return sorted(by_timestamp.values(), key=lambda c: int(c["timestamp"]))[-limit:]
         except Exception as e:
