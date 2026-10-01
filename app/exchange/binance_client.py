@@ -121,46 +121,71 @@ class BinanceFuturesClient:
         req_limit = min(limit + (2 if only_closed else 0), 1000)
         url = f"{self.base_url}/fapi/v1/klines"
         params: Dict[str, Any] = {"symbol": symbol.upper(), "interval": interval, "limit": req_limit}
-        if end_time:
+        if end_time is not None:
             params["endTime"] = end_time
-        if start_time:
+        if start_time is not None:
             params["startTime"] = start_time
 
         session = await self._get_session()
         try:
-            async with session.get(url, params=params) as resp:
-                if not await self._check_rate_limit(resp):
-                    return []
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.error(f"Failed to fetch klines for {symbol}: HTTP {resp.status} - {text}")
-                    return []
-                raw_data = await resp.json()
-                if not isinstance(raw_data, list):
-                    return []
+            async def fetch_page(page_params: Dict[str, Any]) -> Optional[List[Any]]:
+                async with session.get(url, params=page_params) as resp:
+                    if not await self._check_rate_limit(resp):
+                        return None
+                    if resp.status != 200:
+                        text = await resp.text()
+                        logger.error(f"Failed to fetch klines for {symbol}: HTTP {resp.status} - {text}")
+                        return None
+                    raw_data = await resp.json()
+                    return raw_data if isinstance(raw_data, list) else None
 
-                candles: List[Dict[str, Any]] = []
-                for item in raw_data:
-                    open_time = int(item[0])
-                    close_time = int(item[6])
-                    candle = {
-                        "timestamp": open_time,
+            raw_data = await fetch_page(params)
+            if raw_data is None:
+                return []
+
+            def parse_candles(rows: List[Any]) -> List[Dict[str, Any]]:
+                parsed: List[Dict[str, Any]] = []
+                for item in rows:
+                    parsed.append({
+                        "timestamp": int(item[0]),
                         "open": float(item[1]),
                         "high": float(item[2]),
                         "low": float(item[3]),
                         "close": float(item[4]),
                         "volume": float(item[5]),
-                        "close_time": close_time,
-                    }
-                    candles.append(candle)
+                        "close_time": int(item[6]),
+                    })
+                return parsed
 
-                if only_closed:
-                    # Determine closed state from Binance close timestamps instead
-                    # of assuming the final response row is always the open candle.
-                    now_ms = int(time.time() * 1000)
-                    candles = [c for c in candles if int(c["close_time"]) < now_ms]
-
+            candles = parse_candles(raw_data)
+            if not only_closed:
                 return candles[-limit:]
+
+            # A first page capped at 1000 can contain the current open candle,
+            # leaving one fewer closed row than requested. Backfill only the
+            # exact shortfall, without crossing an explicit start_time bound.
+            now_ms = int(time.time() * 1000)
+            by_timestamp = {
+                int(c["timestamp"]): c
+                for c in candles
+                if int(c["close_time"]) < now_ms
+            }
+            if len(by_timestamp) < limit and candles and start_time is None:
+                earliest_timestamp = min(int(c["timestamp"]) for c in candles)
+                backfill_params = {
+                    "symbol": symbol.upper(),
+                    "interval": interval,
+                    "limit": min(limit - len(by_timestamp), 1000),
+                    "endTime": earliest_timestamp - 1,
+                }
+                backfill = await fetch_page(backfill_params)
+                if backfill is None:
+                    return []
+                for candle in parse_candles(backfill):
+                    if int(candle["close_time"]) < now_ms:
+                        by_timestamp[int(candle["timestamp"])] = candle
+
+            return sorted(by_timestamp.values(), key=lambda c: int(c["timestamp"]))[-limit:]
         except Exception as e:
             logger.error(f"Error fetching klines for {symbol}: {e}")
             return []
