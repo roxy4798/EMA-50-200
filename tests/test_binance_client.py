@@ -240,8 +240,8 @@ async def test_backfill_persistent_429_exhausts_retries(monkeypatch):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_genuinely_short_symbol_no_backfill(monkeypatch):
-    """Symbol with only 600 closed candles. Initial page < 1000 rows -> no backfill."""
+async def test_genuinely_short_symbol_verified_by_backfill(monkeypatch):
+    """Symbol with only 600 closed candles. Backfill is attempted and empty result confirms exhaustion."""
     start = NOW_MS - 601 * HOUR_MS
     # 600 closed + 1 open = 601 total rows (< 1000)
     page = [_row(start + i * HOUR_MS) for i in range(600)]
@@ -253,8 +253,9 @@ async def test_genuinely_short_symbol_no_backfill(monkeypatch):
     candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
 
     assert len(candles) == 600  # Genuinely short
-    assert len(session.calls) == 1  # No backfill attempted
+    assert len(session.calls) == 2  # Initial fetch + 1 backfill verifying exhaustion
     assert all(c["close_time"] < NOW_MS for c in candles)
+    assert client.is_history_exhausted("BTCUSDT") is True
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +492,7 @@ async def test_backfill_exhaustion_short_page(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_genuinely_short_260_rows(monkeypatch):
-    """Symbol with only 260 rows (<1000) total. No backfill attempted."""
+    """Symbol with only 260 rows (<1000) total. Backfill verifies exhaustion."""
     start = NOW_MS - 261 * HOUR_MS
     page = [_row(start + i * HOUR_MS) for i in range(259)]
     page.append(_row(start + 259 * HOUR_MS, open_candle=True))
@@ -502,8 +503,9 @@ async def test_genuinely_short_260_rows(monkeypatch):
     candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
 
     assert len(candles) == 259
-    assert len(session.calls) == 1
+    assert len(session.calls) == 2  # Initial fetch + 1 backfill verifying exhaustion
     assert all(c["close_time"] < NOW_MS for c in candles)
+    assert client.is_history_exhausted("BTCUSDT") is True
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +514,7 @@ async def test_genuinely_short_260_rows(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_763_initial_rows_genuinely_short(monkeypatch):
-    """Symbol with only 763 rows (<1000) total. No backfill attempted."""
+    """Symbol with only 763 rows (<1000) total. Backfill verifies exhaustion."""
     start = NOW_MS - 764 * HOUR_MS
     page = [_row(start + i * HOUR_MS) for i in range(762)]
     page.append(_row(start + 762 * HOUR_MS, open_candle=True))
@@ -523,7 +525,8 @@ async def test_763_initial_rows_genuinely_short(monkeypatch):
     candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
 
     assert len(candles) == 762
-    assert len(session.calls) == 1
+    assert len(session.calls) == 2  # Initial fetch + 1 backfill verifying exhaustion
+    assert client.is_history_exhausted("BTCUSDT") is True
 
 
 # ---------------------------------------------------------------------------
@@ -616,3 +619,68 @@ async def test_excessive_retry_after_caps_out(monkeypatch):
     # Should return 999 (partial), not wait 60s
     assert len(candles) == 999
     assert len(session.calls) == 2  # initial + 1 failed attempt (cap exceeded)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for partial initial responses & backfill exhaustion
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_partial_initial_response_backfills_older_candles_to_1000(monkeypatch):
+    """Initial page has 500 rows for established symbol. Backfill collects 600 older rows to reach 1000."""
+    start = NOW_MS - 501 * HOUR_MS
+    page1 = [_row(start + i * HOUR_MS) for i in range(499)]
+    page1.append(_row(start + 499 * HOUR_MS, open_candle=True))
+    assert len(page1) == 500
+
+    backfill_start = start - 600 * HOUR_MS
+    page2 = [_row(backfill_start + i * HOUR_MS) for i in range(600)]
+
+    client, session = _client_with_pages(monkeypatch, [page1, page2])
+
+    candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
+
+    assert len(candles) == 1000
+    assert len(session.calls) == 2
+    assert client.is_history_exhausted("BTCUSDT") is False
+
+
+@pytest.mark.asyncio
+async def test_partial_initial_response_backfill_failure_preserves_not_exhausted(monkeypatch):
+    """Initial page has 500 rows. Backfill encounters 429 rate limit. Must NOT mark exhausted."""
+    start = NOW_MS - 501 * HOUR_MS
+    page1 = [_row(start + i * HOUR_MS) for i in range(499)]
+    page1.append(_row(start + 499 * HOUR_MS, open_candle=True))
+
+    # Initial page succeeds, backfill calls return 429
+    sequence = [(page1, 200), (None, 429), (None, 429)]
+    monkeypatch.setattr("app.exchange.binance_client.time.time", lambda: NOW_MS / 1000)
+    client = BinanceFuturesClient()
+    session = _SessionWithSequence(sequence)
+
+    async def get_session():
+        return session
+
+    monkeypatch.setattr(client, "_get_session", get_session)
+
+    candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
+
+    assert len(candles) == 499
+    # Transient backfill failure must NEVER produce exchange_exhausted=True
+    assert client.is_history_exhausted("BTCUSDT") is False
+
+
+@pytest.mark.asyncio
+async def test_partial_initial_response_backfill_network_error_not_exhausted(monkeypatch):
+    """Initial page has 500 rows. Backfill encounters HTTP 500 error on all attempts. Must NOT mark exhausted."""
+    start = NOW_MS - 501 * HOUR_MS
+    page1 = [_row(start + i * HOUR_MS) for i in range(499)]
+    page1.append(_row(start + 499 * HOUR_MS, open_candle=True))
+
+    client, session = _client_with_pages(monkeypatch, [page1, [], []], statuses=[200, 500, 500])
+
+    candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
+
+    assert len(candles) == 499
+    # Transient server error must NEVER produce exchange_exhausted=True
+    assert client.is_history_exhausted("BTCUSDT") is False

@@ -239,17 +239,12 @@ class BinanceFuturesClient:
             MAX_BACKFILL_PAGES = 3
             MAX_RETRIES_PER_PAGE = 2
             MAX_RATE_LIMIT_WAIT_S = 30
-            last_page_size = len(raw_data)
-            is_exhausted = (last_page_size < req_limit and start_time is None)
+            is_exhausted = False
 
             for _ in range(MAX_BACKFILL_PAGES):
                 if len(by_timestamp) >= limit:
                     break
                 if start_time is not None:
-                    break
-                if last_page_size < req_limit:
-                    # Binance returned fewer rows than requested limit -- no older data on exchange.
-                    is_exhausted = True
                     break
 
                 earliest_timestamp = min(by_timestamp) if by_timestamp else (
@@ -298,6 +293,10 @@ class BinanceFuturesClient:
                 for candle in parse_candles(backfill_raw):
                     if int(candle["close_time"]) < now_ms:
                         by_timestamp.setdefault(int(candle["timestamp"]), candle)
+
+                if len(by_timestamp) >= limit:
+                    is_exhausted = False
+                    break
 
                 if last_page_size < 1000:
                     # Last backfill page was partial — reached the listing boundary.
