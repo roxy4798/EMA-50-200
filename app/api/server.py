@@ -100,6 +100,9 @@ def create_app(
             "telegram_alerts_attempted": getattr(telegram_notifier, "alerts_attempted", 0),
             "symbols_total": len(signal_engine.symbols),
             "symbols_initialized": len(signal_engine.initialized_symbols),
+            "symbols_ready": len(signal_engine.initialized_symbols),
+            "symbols_waiting_for_history": getattr(signal_engine, "get_state_count", lambda s: 0)("WAITING_FOR_HISTORY"),
+            "symbols_retry_pending": getattr(signal_engine, "get_state_count", lambda s: 0)("RETRY_PENDING"),
             "golden_crosses_total": total_signals,
             "live_signals_count": live_signals,
             "historical_crosses_count": historical_signals,
@@ -121,11 +124,14 @@ def create_app(
         symbols_info = []
         for s in signal_engine.symbols:
             is_init = s in signal_engine.initialized_symbols
+            state = getattr(signal_engine, "get_symbol_state", lambda sym: "READY" if is_init else "PENDING")(s)
             history = signal_engine.candles_history.get(s, [])
             last_close = history[-1]["close"] if history else None
             symbols_info.append({
                 "symbol": s,
                 "initialized": is_init,
+                "state": state,
+                "candles_count": len(history),
                 "last_close": last_close,
                 "timeframe": signal_engine.timeframe.upper(),
             })

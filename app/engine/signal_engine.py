@@ -21,6 +21,13 @@ from app.persistence.models import SignalRecord
 logger = logging.getLogger("nexora.engine.signal")
 
 
+# Canonical initialization lifecycle states
+STATE_READY = "READY"
+STATE_WAITING_FOR_HISTORY = "WAITING_FOR_HISTORY"
+STATE_RETRY_PENDING = "RETRY_PENDING"
+STATE_FAILED = "FAILED"
+
+
 class SignalEngine:
     def __init__(
         self,
@@ -54,6 +61,8 @@ class SignalEngine:
         self.symbols: List[str] = []
         self.candles_history: Dict[str, List[Dict[str, Any]]] = {}
         self.initialized_symbols: Set[str] = set()
+        self.symbol_states: Dict[str, str] = {}
+        self.symbol_details: Dict[str, Dict[str, Any]] = {}
         self.total_signals_detected = 0
         self.live_signals_count = 0
         self.historical_crosses_count = 0
@@ -62,8 +71,52 @@ class SignalEngine:
         self._lock = asyncio.Lock()
         self.start_time = time.time()
 
+    @staticmethod
+    def validate_candle_continuity(candles: List[Dict[str, Any]], interval_ms: int = 3600_000) -> bool:
+        """Validates that consecutive closed candles have exact timestamp progression without gaps."""
+        if not candles or len(candles) < 2:
+            return True
+        for i in range(1, len(candles)):
+            prev_ts = int(candles[i - 1]["timestamp"])
+            curr_ts = int(candles[i]["timestamp"])
+            if curr_ts - prev_ts != interval_ms:
+                return False
+        return True
+
+    def get_symbol_state(self, symbol: str) -> str:
+        """Returns the canonical initialization lifecycle state of a symbol."""
+        s = symbol.upper()
+        resolved = self.binance_client.resolve_symbol(s) if hasattr(self.binance_client, "resolve_symbol") else s
+        if resolved in self.symbol_states:
+            return self.symbol_states[resolved]
+        if s in self.symbol_states:
+            return self.symbol_states[s]
+        if resolved in self.initialized_symbols or s in self.initialized_symbols:
+            return STATE_READY
+        return STATE_RETRY_PENDING
+
+    def get_state_count(self, state: str) -> int:
+        """Returns the count of monitored symbols currently in the given state."""
+        return sum(1 for s in self.symbols if self.get_symbol_state(s) == state)
+
+    def get_initialization_summary(self) -> Dict[str, int]:
+        """Provides an aggregate summary of symbol initialization lifecycle states."""
+        return {
+            "ready": len(self.initialized_symbols),
+            "waiting_for_history": self.get_state_count(STATE_WAITING_FOR_HISTORY),
+            "retry_pending": self.get_state_count(STATE_RETRY_PENDING),
+            "failed": self.get_state_count(STATE_FAILED),
+            "total": len(self.symbols),
+        }
+
     def set_symbols(self, symbols: List[str]) -> None:
         self.symbols = [s.upper() for s in symbols]
+        for s in self.symbols:
+            resolved = self.binance_client.resolve_symbol(s) if hasattr(self.binance_client, "resolve_symbol") else s
+            if s not in self.symbol_states:
+                self.symbol_states[s] = STATE_RETRY_PENDING
+            if resolved not in self.symbol_states:
+                self.symbol_states[resolved] = STATE_RETRY_PENDING
 
     async def initialize_symbols(
         self,
@@ -92,7 +145,7 @@ class SignalEngine:
                 )
 
         async def init_single(raw_sym: str) -> None:
-            sym = self.binance_client.resolve_symbol(raw_sym)
+            sym = self.binance_client.resolve_symbol(raw_sym) if hasattr(self.binance_client, "resolve_symbol") else raw_sym
             async with semaphore:
                 for attempt in range(1, 4):
                     try:
@@ -103,21 +156,18 @@ class SignalEngine:
                         if last_cached_ts:
                             cached = await self.database.get_cached_candles(sym, self.timeframe, limit=self.candle_limit)
                             now_ms = int(time.time() * 1000)
-                            # The cache is a warm start only. Always refresh from USD-M
-                            # Futures so /symbol, charts, and signal evaluation share the
-                            # newest closed exchange candle.
                             if now_ms - last_cached_ts > 3600_000 * 2:
                                 missing = await paced_get_klines(
                                     sym,
                                     limit=100,
                                     start_time=last_cached_ts + 3600_000,
                                 )
-                                seen_ts = {c["timestamp"] for c in cached}
+                                seen_ts = {int(c["timestamp"]) for c in cached}
                                 combined = list(cached)
                                 for m in missing:
-                                    if m["timestamp"] not in seen_ts:
+                                    if int(m["timestamp"]) not in seen_ts:
                                         combined.append(m)
-                                        seen_ts.add(m["timestamp"])
+                                        seen_ts.add(int(m["timestamp"]))
                                 candles = combined
                             else:
                                 candles = cached
@@ -128,7 +178,9 @@ class SignalEngine:
                             by_timestamp.update({int(c["timestamp"]): c for c in fresh})
                             candles = sorted(by_timestamp.values(), key=lambda c: int(c["timestamp"]))[-self.candle_limit:]
 
-                        if candles and len(candles) >= self.candle_limit:
+                        is_continuous = self.validate_candle_continuity(candles)
+
+                        if candles and len(candles) >= self.candle_limit and is_continuous:
                             df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
                             enriched_candles = df.to_dict(orient="records")
                             async with self._lock:
@@ -136,6 +188,14 @@ class SignalEngine:
                                 self.initialized_symbols.add(sym)
                                 if raw_sym != sym:
                                     self.initialized_symbols.add(raw_sym)
+                                self.symbol_states[sym] = STATE_READY
+                                if raw_sym != sym:
+                                    self.symbol_states[raw_sym] = STATE_READY
+                                self.symbol_details[sym] = {
+                                    "state": STATE_READY,
+                                    "candles": len(candles),
+                                    "reason": "Sufficient history loaded",
+                                }
                                 if enriched_candles:
                                     self.last_closed_candle_time = max(
                                         self.last_closed_candle_time or 0,
@@ -146,25 +206,214 @@ class SignalEngine:
                                 enriched_candles, sym, self.timeframe,
                                 fast_period=self.fast_period, slow_period=self.slow_period
                             )
+                            logger.info(
+                                "[INIT_STATE] symbol=%s timeframe=%s state=READY candles=%d/%d EMA=(%d/%d) status='Initialized successfully'",
+                                sym, self.timeframe, len(candles), self.candle_limit, self.fast_period, self.slow_period,
+                            )
                             break
                         else:
-                            pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
-                            if attempt < 3:
-                                sleep_time = max(attempt * 1.5, pause_rem + 0.5)
-                                await asyncio.sleep(sleep_time)
+                            # Fewer than candle_limit OR discontinuous
+                            is_exhausted = False
+                            if hasattr(self.binance_client, "is_history_exhausted"):
+                                is_exhausted = bool(self.binance_client.is_history_exhausted(sym))
+                            elif is_continuous and candles and len(candles) < self.candle_limit:
+                                pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
+                                is_exhausted = (pause_rem <= 0.0)
+
+                            if not is_continuous and candles:
+                                new_state = STATE_RETRY_PENDING
+                                reason = "Discontinuous candle history (gap detected in timestamp sequence)"
+                            elif is_exhausted:
+                                new_state = STATE_WAITING_FOR_HISTORY
+                                reason = f"Limited exchange history ({len(candles) if candles else 0}/{self.candle_limit} closed 1H candles available)"
                             else:
-                                logger.warning(f"No sufficient candles returned for {sym} (got {len(candles) if candles else 0})")
+                                new_state = STATE_RETRY_PENDING
+                                reason = f"Temporary REST failure, partial retrieval, or rate limit ({len(candles) if candles else 0}/{self.candle_limit} candles)"
+
+                            # Save available valid candles so live WebSocket can accumulate from them
+                            if candles and is_continuous:
+                                df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
+                                enriched_candles = df.to_dict(orient="records")
+                                async with self._lock:
+                                    self.candles_history[sym] = enriched_candles
+                                await self.database.cache_candles(
+                                    enriched_candles, sym, self.timeframe,
+                                    fast_period=self.fast_period, slow_period=self.slow_period
+                                )
+
+                            async with self._lock:
+                                self.symbol_states[sym] = new_state
+                                if raw_sym != sym:
+                                    self.symbol_states[raw_sym] = new_state
+                                self.symbol_details[sym] = {
+                                    "state": new_state,
+                                    "candles": len(candles) if candles else 0,
+                                    "reason": reason,
+                                }
+                                self.initialized_symbols.discard(sym)
+                                self.initialized_symbols.discard(raw_sym)
+
+                            if new_state == STATE_WAITING_FOR_HISTORY:
+                                logger.info(
+                                    "[INIT_STATE] symbol=%s timeframe=%s state=WAITING_FOR_HISTORY candles=%d/%d reason='%s' action='Accumulating live candles via WebSocket'",
+                                    sym, self.timeframe, len(candles) if candles else 0, self.candle_limit, reason,
+                                )
+                                # For newly listed contracts, break startup retry loop to preserve rate limits
+                                break
+                            else:
+                                # RETRY_PENDING
+                                pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
+                                retry_interval = max(attempt * 1.5, pause_rem + 0.5)
+                                if attempt < 3:
+                                    logger.warning(
+                                        "[INIT_STATE] symbol=%s timeframe=%s state=RETRY_PENDING candles=%d/%d reason='%s' next_retry_in=%.1fs (attempt %d/3)",
+                                        sym, self.timeframe, len(candles) if candles else 0, self.candle_limit, reason, retry_interval, attempt,
+                                    )
+                                    await asyncio.sleep(retry_interval)
+                                else:
+                                    logger.warning(
+                                        "[INIT_STATE] symbol=%s timeframe=%s state=RETRY_PENDING candles=%d/%d reason='%s' (startup retries exhausted, will retry in background)",
+                                        sym, self.timeframe, len(candles) if candles else 0, self.candle_limit, reason,
+                                    )
                     except Exception as e:
                         pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
+                        retry_interval = max(attempt * 1.5, pause_rem + 0.5)
+                        async with self._lock:
+                            self.symbol_states[sym] = STATE_RETRY_PENDING
+                            if raw_sym != sym:
+                                self.symbol_states[raw_sym] = STATE_RETRY_PENDING
+                            self.symbol_details[sym] = {
+                                "state": STATE_RETRY_PENDING,
+                                "candles": 0,
+                                "reason": f"Exception during fetch: {e}",
+                            }
+                            self.initialized_symbols.discard(sym)
+                            self.initialized_symbols.discard(raw_sym)
                         if attempt < 3:
-                            sleep_time = max(attempt * 1.5, pause_rem + 0.5)
-                            await asyncio.sleep(sleep_time)
+                            logger.warning(
+                                "[INIT_STATE] symbol=%s timeframe=%s state=RETRY_PENDING error='%s' next_retry_in=%.1fs (attempt %d/3)",
+                                sym, self.timeframe, str(e), retry_interval, attempt,
+                            )
+                            await asyncio.sleep(retry_interval)
                         else:
-                            logger.error(f"Failed to initialize {sym} after {attempt} attempts: {e}")
+                            logger.error(
+                                "[INIT_STATE] symbol=%s timeframe=%s state=RETRY_PENDING error='%s' (startup retries exhausted, will retry in background)",
+                                sym, self.timeframe, str(e),
+                            )
 
         tasks = [init_single(s) for s in self.symbols]
         await asyncio.gather(*tasks, return_exceptions=True)
-        logger.info(f"Initialization complete: {len(self.initialized_symbols)}/{len(self.symbols)} ready.")
+        ready_count = len(self.initialized_symbols)
+        waiting_count = self.get_state_count(STATE_WAITING_FOR_HISTORY)
+        retry_count = self.get_state_count(STATE_RETRY_PENDING)
+        logger.info(
+            f"Initialization complete: {ready_count}/{len(self.symbols)} ready "
+            f"(Waiting for history: {waiting_count}, Retry pending: {retry_count})."
+        )
+
+    async def retry_unready_symbols(
+        self,
+        max_concurrency: int = 2,
+        pacing_delay_ms: float = 200.0,
+    ) -> Dict[str, int]:
+        """Retries symbols that are not yet READY without blocking live WebSocket processing."""
+        unready = [s for s in self.symbols if self.get_symbol_state(s) != STATE_READY]
+        if not unready:
+            return self.get_initialization_summary()
+
+        pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
+        if pause_rem > 0:
+            logger.info(f"Skipping retry of {len(unready)} unready symbols; Binance REST is paused for {pause_rem:.1f}s.")
+            return self.get_initialization_summary()
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+        pacer_lock = asyncio.Lock()
+        last_req_time = 0.0
+
+        async def paced_fetch(sym: str, limit: int) -> List[Dict[str, Any]]:
+            nonlocal last_req_time
+            async with pacer_lock:
+                now = time.monotonic()
+                elapsed_ms = (now - last_req_time) * 1000.0
+                if elapsed_ms < pacing_delay_ms:
+                    await asyncio.sleep((pacing_delay_ms - elapsed_ms) / 1000.0)
+                last_req_time = time.monotonic()
+                return await self.binance_client.get_klines(
+                    sym, interval=self.timeframe, limit=limit, only_closed=True
+                )
+
+        async def retry_single(raw_sym: str) -> None:
+            sym = self.binance_client.resolve_symbol(raw_sym) if hasattr(self.binance_client, "resolve_symbol") else raw_sym
+            async with semaphore:
+                try:
+                    existing = self.candles_history.get(sym, [])
+                    if not existing:
+                        existing = await self.database.get_cached_candles(sym, self.timeframe, limit=self.candle_limit)
+                    fresh = await paced_fetch(sym, limit=self.candle_limit)
+                    candles = []
+                    if fresh or existing:
+                        by_timestamp = {int(c["timestamp"]): c for c in existing}
+                        by_timestamp.update({int(c["timestamp"]): c for c in fresh})
+                        candles = sorted(by_timestamp.values(), key=lambda c: int(c["timestamp"]))[-self.candle_limit:]
+
+                    is_continuous = self.validate_candle_continuity(candles)
+
+                    if candles and len(candles) >= self.candle_limit and is_continuous:
+                        df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
+                        enriched = df.to_dict(orient="records")
+                        async with self._lock:
+                            self.candles_history[sym] = enriched
+                            self.initialized_symbols.add(sym)
+                            if raw_sym != sym:
+                                self.initialized_symbols.add(raw_sym)
+                            self.symbol_states[sym] = STATE_READY
+                            if raw_sym != sym:
+                                self.symbol_states[raw_sym] = STATE_READY
+                            self.symbol_details[sym] = {
+                                "state": STATE_READY,
+                                "candles": len(candles),
+                                "reason": "Background retry completed successfully",
+                            }
+                        await self.database.cache_candles(
+                            enriched, sym, self.timeframe,
+                            fast_period=self.fast_period, slow_period=self.slow_period
+                        )
+                        logger.info(
+                            "[SYMBOL_PROMOTED_TO_READY] %s is now READY via background retry (%d/%d candles)",
+                            sym, len(candles), self.candle_limit,
+                        )
+                    else:
+                        is_exhausted = False
+                        if hasattr(self.binance_client, "is_history_exhausted"):
+                            is_exhausted = bool(self.binance_client.is_history_exhausted(sym))
+                        elif candles and len(candles) < self.candle_limit:
+                            pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
+                            is_exhausted = (pause_rem <= 0.0)
+
+                        new_state = STATE_WAITING_FOR_HISTORY if (is_exhausted and is_continuous) else STATE_RETRY_PENDING
+                        if candles and is_continuous:
+                            df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
+                            enriched = df.to_dict(orient="records")
+                            async with self._lock:
+                                self.candles_history[sym] = enriched
+                            await self.database.cache_candles(
+                                enriched, sym, self.timeframe,
+                                fast_period=self.fast_period, slow_period=self.slow_period
+                            )
+                        async with self._lock:
+                            self.symbol_states[sym] = new_state
+                            if raw_sym != sym:
+                                self.symbol_states[raw_sym] = new_state
+                            self.symbol_details[sym] = {
+                                "state": new_state,
+                                "candles": len(candles) if candles else 0,
+                                "reason": f"{new_state} after background retry ({len(candles) if candles else 0}/{self.candle_limit})",
+                            }
+                except Exception as e:
+                    logger.debug(f"Background retry error for {sym}: {e}")
+
+        await asyncio.gather(*[retry_single(s) for s in unready], return_exceptions=True)
+        return self.get_initialization_summary()
 
     async def handle_closed_candle(self, symbol: str, candle: Dict[str, Any]) -> Optional[GoldenCrossSignal]:
         """Called when a 1H candle closes for a symbol."""
@@ -179,20 +428,24 @@ class SignalEngine:
             logger.error("LIVE_SIGNAL_REJECTED: invalid 1H candle timestamp for %s", symbol)
             return None
         symbol = symbol.upper()
-        if self.symbols and symbol not in self.symbols:
+        resolved_sym = self.binance_client.resolve_symbol(symbol) if hasattr(self.binance_client, "resolve_symbol") else symbol
+        if self.symbols and symbol not in self.symbols and resolved_sym not in self.symbols:
             logger.error("LIVE_SIGNAL_REJECTED: unmonitored symbol %s", symbol)
             return None
         self.last_closed_candle_time = max(self.last_closed_candle_time or 0, timestamp)
 
         async with self._lock:
             history = self.candles_history.get(symbol, [])
+            if not history and resolved_sym != symbol:
+                history = self.candles_history.get(resolved_sym, [])
+
             if history and timestamp < int(history[-1]["timestamp"]):
                 logger.warning(
                     "LIVE_SIGNAL_REJECTED: out-of-order candle for %s timestamp=%s latest=%s",
                     symbol, timestamp, history[-1]["timestamp"],
                 )
                 return None
-            if history and history[-1]["timestamp"] == candle["timestamp"]:
+            if history and int(history[-1]["timestamp"]) == timestamp:
                 history[-1] = candle
             else:
                 history.append(candle)
@@ -200,14 +453,33 @@ class SignalEngine:
             if len(history) > self.candle_limit:
                 history = history[-self.candle_limit:]
 
-            # Enrich with EMA50 and EMA200
+            # Enrich with EMA
             df = enrich_candles_with_ema(history, self.fast_period, self.slow_period)
             self.candles_history[symbol] = df.to_dict(orient="records")
+            if resolved_sym != symbol:
+                self.candles_history[resolved_sym] = self.candles_history[symbol]
 
-            # Canonical requirement: require at least 1000 closed candles for full EMA200
-            # convergence. If history < 1000, NO SIGNAL is evaluated (no short fallback).
+            is_continuous = self.validate_candle_continuity(history)
             signal = None
-            if len(df) >= self.candle_limit:
+
+            if len(df) >= self.candle_limit and is_continuous:
+                if symbol not in self.initialized_symbols:
+                    self.initialized_symbols.add(symbol)
+                    if resolved_sym != symbol:
+                        self.initialized_symbols.add(resolved_sym)
+                    self.symbol_states[symbol] = STATE_READY
+                    if resolved_sym != symbol:
+                        self.symbol_states[resolved_sym] = STATE_READY
+                    self.symbol_details[symbol] = {
+                        "state": STATE_READY,
+                        "candles": len(df),
+                        "reason": "Accumulated sufficient closed candles via WebSocket",
+                    }
+                    logger.info(
+                        "[SYMBOL_PROMOTED_TO_READY] %s has accumulated %d/%d closed 1H candles. Transitioned to READY.",
+                        symbol, len(df), self.candle_limit,
+                    )
+
                 signal = detect_golden_cross(
                     df,
                     symbol=symbol,
@@ -218,6 +490,17 @@ class SignalEngine:
                     slow_period=self.slow_period,
                 )
             else:
+                # Still under candle_limit or discontinuous: fail-closed, NO signal
+                curr_state = self.get_symbol_state(symbol)
+                if curr_state != STATE_READY:
+                    self.symbol_states[symbol] = STATE_WAITING_FOR_HISTORY
+                    if resolved_sym != symbol:
+                        self.symbol_states[resolved_sym] = STATE_WAITING_FOR_HISTORY
+                    self.symbol_details[symbol] = {
+                        "state": STATE_WAITING_FOR_HISTORY,
+                        "candles": len(df),
+                        "reason": f"Accumulating live candles ({len(df)}/{self.candle_limit})",
+                    }
                 logger.debug(
                     "INSUFFICIENT_HISTORY: %s has %d/%d closed candles. No signal evaluated.",
                     symbol, len(df), self.candle_limit,
@@ -395,15 +678,55 @@ class SignalEngine:
                 # Warm up only new symbols
                 semaphore = asyncio.Semaphore(5)
 
-                async def warm_new(sym: str):
+                async def warm_new(raw_sym: str):
+                    sym = self.binance_client.resolve_symbol(raw_sym) if hasattr(self.binance_client, "resolve_symbol") else raw_sym
                     async with semaphore:
                         try:
-                            candles = await self.binance_client.get_klines(sym, interval=self.timeframe, limit=self.candle_limit, only_closed=True)
-                            if candles:
+                            candles = await self.binance_client.get_klines(
+                                sym, interval=self.timeframe, limit=self.candle_limit, only_closed=True
+                            )
+                            is_continuous = self.validate_candle_continuity(candles)
+                            if candles and len(candles) >= self.candle_limit and is_continuous:
                                 df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
+                                enriched = df.to_dict(orient="records")
                                 async with self._lock:
-                                    self.candles_history[sym] = df.to_dict(orient="records")
+                                    self.candles_history[sym] = enriched
                                     self.initialized_symbols.add(sym)
+                                    if raw_sym != sym:
+                                        self.initialized_symbols.add(raw_sym)
+                                    self.symbol_states[sym] = STATE_READY
+                                    if raw_sym != sym:
+                                        self.symbol_states[raw_sym] = STATE_READY
+                                    self.symbol_details[sym] = {
+                                        "state": STATE_READY,
+                                        "candles": len(candles),
+                                        "reason": "Initialized during universe refresh",
+                                    }
+                                await self.database.cache_candles(
+                                    enriched, sym, self.timeframe,
+                                    fast_period=self.fast_period, slow_period=self.slow_period
+                                )
+                            else:
+                                is_exhausted = hasattr(self.binance_client, "is_history_exhausted") and self.binance_client.is_history_exhausted(sym)
+                                state = STATE_WAITING_FOR_HISTORY if (is_exhausted and is_continuous) else STATE_RETRY_PENDING
+                                if candles and is_continuous:
+                                    df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
+                                    enriched = df.to_dict(orient="records")
+                                    async with self._lock:
+                                        self.candles_history[sym] = enriched
+                                    await self.database.cache_candles(
+                                        enriched, sym, self.timeframe,
+                                        fast_period=self.fast_period, slow_period=self.slow_period
+                                    )
+                                async with self._lock:
+                                    self.symbol_states[sym] = state
+                                    if raw_sym != sym:
+                                        self.symbol_states[raw_sym] = state
+                                    self.symbol_details[sym] = {
+                                        "state": state,
+                                        "candles": len(candles) if candles else 0,
+                                        "reason": f"Discovered during refresh ({len(candles) if candles else 0}/{self.candle_limit} candles)",
+                                    }
                         except Exception as e:
                             logger.error(f"Error warming new symbol {sym}: {e}")
 

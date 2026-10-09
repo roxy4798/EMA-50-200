@@ -212,6 +212,8 @@ async def main() -> None:
                 )
                 ready_syms = len(signal_engine.initialized_symbols)
                 total_syms = len(signal_engine.symbols)
+                waiting_syms = signal_engine.get_state_count("WAITING_FOR_HISTORY")
+                retry_syms = signal_engine.get_state_count("RETRY_PENDING")
                 c429 = binance_client.rate_limit_429_count
                 c418 = binance_client.ip_ban_418_count
 
@@ -219,20 +221,33 @@ async def main() -> None:
                     logger.info(
                         f"[HEALTH_SUMMARY] Feed: HEALTHY | WS: {active_conn}/{total_workers} active | "
                         f"Msgs: {tot_msgs} | Klines: {tot_klines} (last: {last_kline_str}) | "
-                        f"Closed: {closed_count} | Ready: {ready_syms}/{total_syms} | "
+                        f"Closed: {closed_count} | Ready: {ready_syms}/{total_syms} (Waiting: {waiting_syms}, RetryPending: {retry_syms}) | "
                         f"REST 429/418: {c429}/{c418} | Reconnects: {reconnects}"
                     )
                 else:
                     logger.warning(
                         f"[HEALTH_WARNING] Feed: {status} | WS: {active_conn}/{total_workers} active | "
                         f"Msgs: {tot_msgs} | Klines: {tot_klines} (last: {last_kline_str}) | "
-                        f"Closed: {closed_count} | Ready: {ready_syms}/{total_syms} | "
+                        f"Closed: {closed_count} | Ready: {ready_syms}/{total_syms} (Waiting: {waiting_syms}, RetryPending: {retry_syms}) | "
                         f"REST 429/418: {c429}/{c418} | Reconnects: {reconnects}"
                     )
             except Exception as e:
                 logger.error(f"Error in periodic health summary: {e}")
 
     health_task = asyncio.create_task(periodic_health_summary())
+
+    # Periodic background retry for unready symbols (runs every 5 minutes)
+    async def periodic_unready_retry():
+        while True:
+            await asyncio.sleep(300)
+            try:
+                unready_count = len(signal_engine.symbols) - len(signal_engine.initialized_symbols)
+                if unready_count > 0:
+                    await signal_engine.retry_unready_symbols(max_concurrency=2, pacing_delay_ms=250.0)
+            except Exception as e:
+                logger.error(f"Error in periodic unready symbols retry: {e}")
+
+    retry_task = asyncio.create_task(periodic_unready_retry())
 
     # Periodic symbol refresh task (runs every 60 minutes)
     async def periodic_refresh():
@@ -266,6 +281,7 @@ async def main() -> None:
     finally:
         print("\nShutting down NEXORA EMA CROSS...")
         health_task.cancel()
+        retry_task.cancel()
         refresh_task.cancel()
         if terminal_dashboard:
             await terminal_dashboard.stop()

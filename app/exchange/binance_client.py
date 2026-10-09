@@ -35,10 +35,19 @@ class BinanceFuturesClient:
         self.rate_limit_429_count = 0
         self.ip_ban_418_count = 0
         self._pause_until = 0.0
+        self._fetch_meta: Dict[str, Dict[str, Any]] = {}
 
     def resolve_symbol(self, symbol: str) -> str:
         s = symbol.upper()
         return self.COMMON_ALIASES.get(s, s)
+
+    def get_fetch_meta(self, symbol: str) -> Dict[str, Any]:
+        """Returns metadata from the most recent klines fetch for the symbol."""
+        return self._fetch_meta.get(self.resolve_symbol(symbol), {})
+
+    def is_history_exhausted(self, symbol: str) -> bool:
+        """Returns True if the most recent klines fetch indicated Binance history is exhausted (<1000 rows available on exchange)."""
+        return bool(self.get_fetch_meta(symbol).get("exchange_exhausted", False))
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -135,6 +144,12 @@ class BinanceFuturesClient:
         if time.time() < self._pause_until:
             wait_time = self._pause_until - time.time()
             logger.warning(f"REST requests paused due to rate-limit. Waiting {wait_time:.1f}s...")
+            self._fetch_meta[symbol] = {
+                "exchange_exhausted": False,
+                "status": "rate_limited",
+                "candles_count": 0,
+                "error": f"Paused for {wait_time:.1f}s",
+            }
             return []
 
         req_limit = min(limit + (2 if only_closed else 0), 1000)
@@ -160,6 +175,12 @@ class BinanceFuturesClient:
 
             raw_data = await fetch_page(params)
             if raw_data is None:
+                self._fetch_meta[symbol] = {
+                    "exchange_exhausted": False,
+                    "status": "rate_limited" if time.time() < self._pause_until else "error",
+                    "candles_count": 0,
+                    "error": "Failed to fetch initial klines page",
+                }
                 return []
 
             def parse_candles(rows: List[Any]) -> List[Dict[str, Any]]:
@@ -178,7 +199,13 @@ class BinanceFuturesClient:
 
             candles = parse_candles(raw_data)
             if not only_closed:
-                return candles[-limit:]
+                result = candles[-limit:]
+                self._fetch_meta[symbol] = {
+                    "exchange_exhausted": len(raw_data) < req_limit,
+                    "status": "success",
+                    "candles_count": len(result),
+                }
+                return result
 
             # Filter to closed candles only and collect into a timestamp-keyed
             # dict for automatic deduplication.
@@ -212,6 +239,7 @@ class BinanceFuturesClient:
             MAX_RETRIES_PER_PAGE = 2
             MAX_RATE_LIMIT_WAIT_S = 30
             last_page_size = len(raw_data)
+            is_exhausted = (last_page_size < req_limit)
 
             for _ in range(MAX_BACKFILL_PAGES):
                 if len(by_timestamp) >= limit:
@@ -220,6 +248,7 @@ class BinanceFuturesClient:
                     break
                 if last_page_size < 1000:
                     # Binance returned fewer than 1000 rows -- no older data.
+                    is_exhausted = True
                     break
 
                 earliest_timestamp = min(by_timestamp) if by_timestamp else (
@@ -256,17 +285,32 @@ class BinanceFuturesClient:
 
                 if backfill_raw is None:
                     # All retries exhausted — return what we have (fail-closed).
+                    is_exhausted = False
                     break
                 last_page_size = len(backfill_raw)
+                if last_page_size < 1000:
+                    is_exhausted = True
                 if last_page_size == 0:
                     break
                 for candle in parse_candles(backfill_raw):
                     if int(candle["close_time"]) < now_ms:
                         by_timestamp.setdefault(int(candle["timestamp"]), candle)
 
-            return sorted(by_timestamp.values(), key=lambda c: int(c["timestamp"]))[-limit:]
+            result = sorted(by_timestamp.values(), key=lambda c: int(c["timestamp"]))[-limit:]
+            self._fetch_meta[symbol] = {
+                "exchange_exhausted": is_exhausted,
+                "status": "success",
+                "candles_count": len(result),
+            }
+            return result
         except Exception as e:
             logger.error(f"Error fetching klines for {symbol}: {e}")
+            self._fetch_meta[symbol] = {
+                "exchange_exhausted": False,
+                "status": "exception",
+                "candles_count": 0,
+                "error": str(e),
+            }
             return []
 
     async def check_connectivity(self) -> bool:

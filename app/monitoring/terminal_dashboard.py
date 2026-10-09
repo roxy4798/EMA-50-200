@@ -125,6 +125,8 @@ class TerminalDashboard:
 
         init_count = len(self.signal_engine.initialized_symbols)
         total_syms = len(self.signal_engine.symbols)
+        waiting_count = getattr(self.signal_engine, "get_state_count", lambda s: 0)("WAITING_FOR_HISTORY")
+        sym_str = f"{init_count} / {total_syms}" + (f" ({waiting_count} waiting)" if waiting_count > 0 else "")
         init_style = "green" if init_count >= total_syms and total_syms > 0 else "yellow"
 
         total_signals = await self.database.get_total_signals_count()
@@ -150,7 +152,7 @@ class TerminalDashboard:
         # Row 1: Core Connectivity
         status_table.add_row(
             "BINANCE:", Text(binance_status, style=binance_style),
-            "SYMBOLS:", Text(f"{init_count} / {total_syms}", style=init_style),
+            "SYMBOLS:", Text(sym_str, style=init_style),
         )
         # Row 2: Stream & Market Data
         status_table.add_row(
