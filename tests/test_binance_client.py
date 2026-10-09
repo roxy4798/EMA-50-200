@@ -388,12 +388,18 @@ async def test_safety_cap_limits_backfill_pages(monkeypatch):
     p0 = [_row(start + i * HOUR_MS) for i in range(999)]
     p0.append(_row(start + 999 * HOUR_MS, open_candle=True))
 
-    # Each backfill page returns 1000 rows but all are open (tests the cap)
-    fake_backfill = [_row(start - (i + 1) * HOUR_MS, open_candle=True) for i in range(1000)]
+    # Each backfill page advances 1000 rows but all are open (tests the cap)
+    backfill_pages = [
+        [
+            _row(start - (page_index * 1000 + i + 1) * HOUR_MS, open_candle=True)
+            for i in range(1000)
+        ]
+        for page_index in range(3)
+    ]
 
     # 4 pages total: initial + 3 backfill (safety cap)
     client, session = _client_with_pages(
-        monkeypatch, [p0, fake_backfill, fake_backfill, fake_backfill]
+        monkeypatch, [p0, *backfill_pages]
     )
 
     candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
@@ -401,6 +407,7 @@ async def test_safety_cap_limits_backfill_pages(monkeypatch):
     assert len(candles) == 999
     # 1 initial + 3 backfill × (initial attempt only, no 429 retry) = 4 requests
     assert len(session.calls) == 4
+    assert client.is_history_exhausted("BTCUSDT") is False
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +649,82 @@ async def test_partial_initial_response_backfills_older_candles_to_1000(monkeypa
 
     assert len(candles) == 1000
     assert len(session.calls) == 2
+    assert client.is_history_exhausted("BTCUSDT") is False
+
+
+@pytest.mark.asyncio
+async def test_partial_initial_and_backfill_pages_continue_to_older_data(monkeypatch):
+    """A short backfill page is not exhaustion while older candles may remain."""
+    start = NOW_MS - 501 * HOUR_MS
+    first_page = [_row(start + i * HOUR_MS) for i in range(499)]
+    first_page.append(_row(start + 499 * HOUR_MS, open_candle=True))
+    page2_start = start - 300 * HOUR_MS
+    page2 = [_row(page2_start + i * HOUR_MS) for i in range(200)]
+    page3_start = page2_start - 400 * HOUR_MS
+    page3 = [_row(page3_start + i * HOUR_MS) for i in range(400)]
+    client, session = _client_with_pages(monkeypatch, [first_page, page2, page3])
+
+    candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
+
+    assert len(candles) == 1000
+    assert len(session.calls) == 3
+    assert session.calls[2][1]["endTime"] == page2_start - 1
+    assert client.is_history_exhausted("BTCUSDT") is False
+
+
+@pytest.mark.asyncio
+async def test_partial_backfill_then_empty_confirms_listing_boundary(monkeypatch):
+    """Only the empty request after a partial page confirms history exhaustion."""
+    start = NOW_MS - 501 * HOUR_MS
+    first_page = [_row(start + i * HOUR_MS) for i in range(499)]
+    first_page.append(_row(start + 499 * HOUR_MS, open_candle=True))
+    partial_backfill = [_row(start - HOUR_MS), _row(start - 2 * HOUR_MS)]
+    client, session = _client_with_pages(monkeypatch, [first_page, partial_backfill, []])
+
+    candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
+
+    assert len(candles) == 501
+    assert len(session.calls) == 3
+    assert session.calls[2][1]["endTime"] == start - 2 * HOUR_MS - 1
+    assert client.is_history_exhausted("BTCUSDT") is True
+
+
+@pytest.mark.asyncio
+async def test_partial_backfill_followed_by_http_failure_is_not_exhausted(monkeypatch):
+    """A failed continuation after a partial page leaves exhaustion unconfirmed."""
+    start = NOW_MS - 501 * HOUR_MS
+    first_page = [_row(start + i * HOUR_MS) for i in range(499)]
+    first_page.append(_row(start + 499 * HOUR_MS, open_candle=True))
+    partial_backfill = [_row(start - HOUR_MS), _row(start - 2 * HOUR_MS)]
+    client, session = _client_with_pages(
+        monkeypatch,
+        [first_page, partial_backfill, [], []],
+        statuses=[200, 200, 500, 500],
+    )
+
+    candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
+
+    assert len(candles) == 501
+    assert len(session.calls) == 4
+    assert client.is_history_exhausted("BTCUSDT") is False
+
+
+@pytest.mark.asyncio
+async def test_1000_candles_collected_across_multiple_partial_pages_not_exhausted(monkeypatch):
+    """Reaching 1000 closed candles through several short pages is success."""
+    start = NOW_MS - 501 * HOUR_MS
+    first_page = [_row(start + i * HOUR_MS) for i in range(499)]
+    first_page.append(_row(start + 499 * HOUR_MS, open_candle=True))
+    page2_start = start - 300 * HOUR_MS
+    page2 = [_row(page2_start + i * HOUR_MS) for i in range(250)]
+    page3_start = page2_start - 300 * HOUR_MS
+    page3 = [_row(page3_start + i * HOUR_MS) for i in range(300)]
+    client, session = _client_with_pages(monkeypatch, [first_page, page2, page3])
+
+    candles = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
+
+    assert len(candles) == 1000
+    assert len(session.calls) == 3
     assert client.is_history_exhausted("BTCUSDT") is False
 
 
