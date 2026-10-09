@@ -50,22 +50,41 @@ class BinanceFuturesClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def _check_rate_limit(self, resp: aiohttp.ClientResponse) -> bool:
+    @property
+    def pause_remaining(self) -> float:
+        rem = self._pause_until - time.time()
+        return max(0.0, rem)
+
+    @property
+    def is_paused(self) -> bool:
+        return self.pause_remaining > 0.0
+
+    async def _check_rate_limit(self, resp: aiohttp.ClientResponse, endpoint_category: str = "klines") -> bool:
         """Inspects response for rate limit (429) or IP ban (418) codes and updates backoff."""
         if resp.status == 429:
             self.rate_limit_429_count += 1
             retry_after = resp.headers.get("Retry-After")
-            wait_sec = int(retry_after) if retry_after and retry_after.isdigit() else 5
+            if retry_after and retry_after.isdigit():
+                wait_sec = float(retry_after)
+            else:
+                # Bounded exponential backoff with base 5.0, capped at 60.0s
+                wait_sec = min(60.0, 5.0 * (2.0 ** min(self.rate_limit_429_count - 1, 4)))
             self._pause_until = time.time() + wait_sec
-            logger.warning(f"REST_429_LIMIT: Binance returned 429. Backing off for {wait_sec}s (Total 429s: {self.rate_limit_429_count})")
+            logger.warning(
+                f"REST_429_LIMIT: Binance returned 429 on endpoint={endpoint_category}. "
+                f"Backing off for {wait_sec:.1f}s (Total 429s: {self.rate_limit_429_count})"
+            )
             return False
 
         if resp.status == 418:
             self.ip_ban_418_count += 1
             retry_after = resp.headers.get("Retry-After")
-            wait_sec = int(retry_after) if retry_after and retry_after.isdigit() else 60
+            wait_sec = float(retry_after) if retry_after and retry_after.isdigit() else 60.0
             self._pause_until = time.time() + wait_sec
-            logger.error(f"REST_418_BAN: Binance returned 418 IP ban warning! Pausing REST requests for {wait_sec}s (Total 418s: {self.ip_ban_418_count})")
+            logger.error(
+                f"REST_418_BAN: Binance returned 418 IP ban warning on endpoint={endpoint_category}! "
+                f"Required waiting period {wait_sec:.1f}s (Total 418s: {self.ip_ban_418_count})"
+            )
             return False
 
         return True
@@ -81,7 +100,7 @@ class BinanceFuturesClient:
         session = await self._get_session()
         try:
             async with session.get(url) as resp:
-                if not await self._check_rate_limit(resp):
+                if not await self._check_rate_limit(resp, endpoint_category="exchangeInfo"):
                     return []
                 if resp.status != 200:
                     logger.error(f"Failed to fetch exchangeInfo: HTTP {resp.status}")
@@ -130,7 +149,7 @@ class BinanceFuturesClient:
         try:
             async def fetch_page(page_params: Dict[str, Any]) -> Optional[List[Any]]:
                 async with session.get(url, params=page_params) as resp:
-                    if not await self._check_rate_limit(resp):
+                    if not await self._check_rate_limit(resp, endpoint_category="klines"):
                         return None
                     if resp.status != 200:
                         text = await resp.text()
@@ -256,7 +275,7 @@ class BinanceFuturesClient:
         session = await self._get_session()
         try:
             async with session.get(url) as resp:
-                await self._check_rate_limit(resp)
+                await self._check_rate_limit(resp, endpoint_category="ping")
                 return resp.status == 200
         except Exception:
             return False

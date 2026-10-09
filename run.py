@@ -157,7 +157,7 @@ async def main() -> None:
 
     # 8. Start Background Symbol Initialization & Historical Scan
     init_task = asyncio.create_task(
-        signal_engine.initialize_symbols(max_concurrency=5, pacing_delay_ms=160.0)
+        signal_engine.initialize_symbols(max_concurrency=3, pacing_delay_ms=200.0)
     )
 
     # 9. Start WebSocket Manager
@@ -191,6 +191,49 @@ async def main() -> None:
 
     asyncio.create_task(post_init())
 
+    # Periodic low-noise health summary task (runs every 60 seconds)
+    async def periodic_health_summary():
+        from datetime import datetime, timezone
+        while True:
+            await asyncio.sleep(60)
+            try:
+                mkt_health = ws_manager.get_market_data_health()
+                status = mkt_health["status"]
+                active_conn = mkt_health.get("active_connections", 0)
+                total_workers = mkt_health.get("total_workers", 0)
+                tot_msgs = mkt_health.get("total_messages_received", 0)
+                tot_klines = mkt_health.get("total_klines_received", 0)
+                closed_count = mkt_health.get("candles_closed_count", 0)
+                reconnects = mkt_health.get("reconnect_count", 0)
+                last_kline_ts = mkt_health.get("last_kline_received_at")
+                last_kline_str = (
+                    datetime.fromtimestamp(last_kline_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                    if last_kline_ts else "NEVER"
+                )
+                ready_syms = len(signal_engine.initialized_symbols)
+                total_syms = len(signal_engine.symbols)
+                c429 = binance_client.rate_limit_429_count
+                c418 = binance_client.ip_ban_418_count
+
+                if mkt_health["is_healthy"]:
+                    logger.info(
+                        f"[HEALTH_SUMMARY] Feed: HEALTHY | WS: {active_conn}/{total_workers} active | "
+                        f"Msgs: {tot_msgs} | Klines: {tot_klines} (last: {last_kline_str}) | "
+                        f"Closed: {closed_count} | Ready: {ready_syms}/{total_syms} | "
+                        f"REST 429/418: {c429}/{c418} | Reconnects: {reconnects}"
+                    )
+                else:
+                    logger.warning(
+                        f"[HEALTH_WARNING] Feed: {status} | WS: {active_conn}/{total_workers} active | "
+                        f"Msgs: {tot_msgs} | Klines: {tot_klines} (last: {last_kline_str}) | "
+                        f"Closed: {closed_count} | Ready: {ready_syms}/{total_syms} | "
+                        f"REST 429/418: {c429}/{c418} | Reconnects: {reconnects}"
+                    )
+            except Exception as e:
+                logger.error(f"Error in periodic health summary: {e}")
+
+    health_task = asyncio.create_task(periodic_health_summary())
+
     # Periodic symbol refresh task (runs every 60 minutes)
     async def periodic_refresh():
         while True:
@@ -222,6 +265,7 @@ async def main() -> None:
         pass
     finally:
         print("\nShutting down NEXORA EMA CROSS...")
+        health_task.cancel()
         refresh_task.cancel()
         if terminal_dashboard:
             await terminal_dashboard.stop()

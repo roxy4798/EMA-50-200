@@ -65,19 +65,39 @@ def create_app(
             dt = datetime.fromtimestamp(signal_engine.last_closed_candle_time / 1000.0, tz=timezone.utc)
             last_closed_str = dt.strftime("%d %b %Y • %H:%M UTC")
 
-        telegram_status = "ONLINE" if telegram_notifier.is_configured else "TELEGRAM CONFIGURATION MISSING"
+        binance_status = "ONLINE"
+        if binance_client.pause_remaining > 0:
+            if binance_client.ip_ban_418_count > 0:
+                binance_status = f"BANNED (418, {int(binance_client.pause_remaining)}s)"
+            else:
+                binance_status = f"RATE LIMITED (429, {int(binance_client.pause_remaining)}s)"
+
+        telegram_status = getattr(telegram_notifier, "status", ("ONLINE" if telegram_notifier.is_configured else "TELEGRAM CONFIGURATION MISSING"))
         market_data_health = ws_manager.get_market_data_health()
+
+        active_conn = market_data_health.get("active_connections", 0)
+        total_workers = market_data_health.get("total_workers", 0)
+        if ws_manager.is_connected:
+            ws_status = f"CONNECTED ({active_conn}/{total_workers})" if total_workers > 0 else "CONNECTED"
+        else:
+            ws_status = "RECONNECTING" if ws_manager.reconnect_count > 0 else "DISCONNECTED"
 
         return {
             "mode": "LONG ONLY",
             "signal": f"EMA{signal_engine.fast_period} CROSS ABOVE EMA{signal_engine.slow_period}",
-            "binance": "ONLINE",
-            "websocket": "CONNECTED" if ws_manager.is_connected else "RECONNECTING",
+            "binance": binance_status,
+            "websocket": ws_status,
             "market_data": market_data_health["status"],
+            "market_data_healthy": market_data_health["is_healthy"],
             "last_kline_received_at": market_data_health["last_kline_received_at"],
+            "last_processed_at": market_data_health.get("last_processed_at"),
+            "stale_threshold_seconds": market_data_health.get("stale_threshold_seconds", 120.0),
             "last_closed_1h_candle": last_closed_str,
             "database": "ONLINE",
             "telegram": telegram_status,
+            "telegram_alerts_sent": getattr(telegram_notifier, "alerts_successful", 0),
+            "telegram_alerts_failed": getattr(telegram_notifier, "alerts_failed", 0),
+            "telegram_alerts_attempted": getattr(telegram_notifier, "alerts_attempted", 0),
             "symbols_total": len(signal_engine.symbols),
             "symbols_initialized": len(signal_engine.initialized_symbols),
             "golden_crosses_total": total_signals,

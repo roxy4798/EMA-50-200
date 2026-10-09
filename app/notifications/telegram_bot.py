@@ -53,6 +53,14 @@ class TelegramNotifier:
         self._last_update_id: int = 0
         self._running: bool = False
 
+        # Alert reliability and telemetry metrics
+        self.alerts_attempted: int = 0
+        self.alerts_successful: int = 0
+        self.alerts_failed: int = 0
+        self.last_api_status: Optional[str] = None
+        self.last_error: Optional[str] = None
+        self.last_successful_send_at: Optional[float] = None
+
         # Service references for single source of truth
         self.signal_engine = signal_engine
         self.ws_manager = ws_manager
@@ -101,6 +109,14 @@ class TelegramNotifier:
     @property
     def is_configured(self) -> bool:
         return self.enabled and bool(self.bot_token) and bool(self.chat_id)
+
+    @property
+    def status(self) -> str:
+        if not self.is_configured:
+            return "TELEGRAM CONFIGURATION MISSING"
+        if self.alerts_failed > 0 and self.alerts_successful == 0:
+            return f"DEGRADED ({self.last_api_status or 'ERROR'})"
+        return "ONLINE"
 
     def is_authorized(self, chat_id: Any) -> bool:
         """Verify chat authorization against configured chat ID."""
@@ -233,6 +249,7 @@ class TelegramNotifier:
         chart_image_path: Optional[str] = None,
     ) -> bool:
         """Sends the Golden Cross message and optional chart image."""
+        self.alerts_attempted += 1
         message_text = self.format_alert_message(signal)
 
         if not self.enabled:
@@ -240,6 +257,9 @@ class TelegramNotifier:
                 f"[TELEGRAM SIMULATED ALERT - {signal.symbol}]:\n{message_text}\n"
                 f"[Attached Chart]: {chart_image_path or 'None'}"
             )
+            self.alerts_successful += 1
+            self.last_api_status = "SIMULATED"
+            self.last_successful_send_at = time.time()
             return True
 
         session = await self._get_session()
@@ -261,17 +281,34 @@ class TelegramNotifier:
                     async with session.post(url, data=form_data) as resp:
                         if resp.status == 200:
                             logger.info(f"Telegram photo alert sent for {signal.symbol}")
+                            self.alerts_successful += 1
+                            self.last_api_status = "OK"
+                            self.last_successful_send_at = time.time()
                             return True
                         elif resp.status == 429:
                             await self._handle_rate_limit(resp)
+                            self.alerts_failed += 1
+                            self.last_api_status = "RATE_LIMITED_429"
                         else:
                             resp_text = await resp.text()
                             logger.error(f"Failed to send Telegram photo: HTTP {resp.status} - {resp_text}")
+                            self.alerts_failed += 1
+                            self.last_api_status = f"HTTP_{resp.status}"
             except Exception as e:
                 logger.error(f"Error sending Telegram photo alert: {e}")
+                self.alerts_failed += 1
+                self.last_api_status = type(e).__name__
 
         # Fallback to text message
-        return await self.send_text_message(message_text)
+        fallback_ok = await self.send_text_message(message_text)
+        if fallback_ok:
+            self.alerts_successful += 1
+            self.last_api_status = "OK"
+            self.last_successful_send_at = time.time()
+            return True
+        else:
+            self.alerts_failed += 1
+            return False
 
     async def send_text_message(self, text: str) -> bool:
         """Legacy text message sender."""

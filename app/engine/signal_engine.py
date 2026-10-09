@@ -148,13 +148,17 @@ class SignalEngine:
                             )
                             break
                         else:
+                            pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
                             if attempt < 3:
-                                await asyncio.sleep(attempt * 1.5)
+                                sleep_time = max(attempt * 1.5, pause_rem + 0.5)
+                                await asyncio.sleep(sleep_time)
                             else:
                                 logger.warning(f"No sufficient candles returned for {sym} (got {len(candles) if candles else 0})")
                     except Exception as e:
+                        pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
                         if attempt < 3:
-                            await asyncio.sleep(attempt * 1.5)
+                            sleep_time = max(attempt * 1.5, pause_rem + 0.5)
+                            await asyncio.sleep(sleep_time)
                         else:
                             logger.error(f"Failed to initialize {sym} after {attempt} attempts: {e}")
 

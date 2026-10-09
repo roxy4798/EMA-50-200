@@ -99,11 +99,29 @@ class TerminalDashboard:
         status_table.add_column("Key2", style="bold white", width=22)
         status_table.add_column("Val2", style="bold", width=24)
 
-        ws_style = "bold green" if self.ws_manager.is_connected else "bold yellow"
-        ws_status = "CONNECTED" if self.ws_manager.is_connected else "DISCONNECTED"
+        ws_health = self.ws_manager.get_market_data_health()
+        active_conn = ws_health.get("active_connections", 0)
+        total_workers = ws_health.get("total_workers", 0)
+        if self.ws_manager.is_connected:
+            ws_status = f"CONNECTED ({active_conn}/{total_workers})" if total_workers > 0 else "CONNECTED"
+            ws_style = "bold green"
+        else:
+            ws_status = "RECONNECTING" if self.ws_manager.reconnect_count > 0 else "DISCONNECTED"
+            ws_style = "bold yellow"
 
-        tg_style = "bold green" if self.telegram_notifier.is_configured else "bold yellow"
-        tg_status = "ONLINE" if self.telegram_notifier.is_configured else "TELEGRAM CONFIGURATION MISSING"
+        if self.binance_client.pause_remaining > 0:
+            if self.binance_client.ip_ban_418_count > 0:
+                binance_status = f"BANNED (418, {int(self.binance_client.pause_remaining)}s)"
+                binance_style = "bold red"
+            else:
+                binance_status = f"RATE LIMITED (429, {int(self.binance_client.pause_remaining)}s)"
+                binance_style = "bold yellow"
+        else:
+            binance_status = "ONLINE"
+            binance_style = "bold green"
+
+        tg_status = getattr(self.telegram_notifier, "status", ("ONLINE" if self.telegram_notifier.is_configured else "TELEGRAM CONFIGURATION MISSING"))
+        tg_style = "bold green" if tg_status == "ONLINE" else "bold yellow"
 
         init_count = len(self.signal_engine.initialized_symbols)
         total_syms = len(self.signal_engine.symbols)
@@ -120,15 +138,18 @@ class TerminalDashboard:
             dt = datetime.fromtimestamp(self.signal_engine.last_closed_candle_time / 1000.0, tz=timezone.utc)
             last_closed_candle_str = dt.strftime("%d %b %H:%M UTC")
 
-        ws_health = self.ws_manager.get_market_data_health()
         mkt_status = ws_health["status"]
         mkt_style = "bold green" if ws_health["is_healthy"] else ("bold yellow" if self.ws_manager.is_connected else "bold red")
         last_kline_ts = ws_health.get("last_kline_received_at")
         last_kline_str = datetime.fromtimestamp(last_kline_ts, tz=timezone.utc).strftime("%d %b %H:%M:%S UTC") if last_kline_ts else "NEVER"
 
+        tg_sent = getattr(self.telegram_notifier, "alerts_successful", 0)
+        tg_failed = getattr(self.telegram_notifier, "alerts_failed", 0)
+        live_str = f"{live_signals} (Sent: {tg_sent} | Failed: {tg_failed})"
+
         # Row 1: Core Connectivity
         status_table.add_row(
-            "BINANCE:", Text("ONLINE", style="bold green"),
+            "BINANCE:", Text(binance_status, style=binance_style),
             "SYMBOLS:", Text(f"{init_count} / {total_syms}", style=init_style),
         )
         # Row 2: Stream & Market Data
@@ -143,7 +164,7 @@ class TerminalDashboard:
         )
         # Row 4: Live Alerts vs Historical Crosses
         status_table.add_row(
-            "LIVE ALERTS (TG):", Text(f"{live_signals}", style="bold green"),
+            "LIVE ALERTS (TG):", Text(live_str, style="bold green"),
             "HISTORICAL CROSSES:", Text(f"{historical_signals}", style="bold cyan"),
         )
         # Row 5: Last Signal & Uptime

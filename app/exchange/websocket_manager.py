@@ -20,6 +20,7 @@ class BinanceWebSocketManager:
         timeframe: str = "1h",
         on_candle_closed: Optional[Callable[[str, Dict], Coroutine]] = None,
         message_timeout_seconds: float = 90.0,
+        stale_threshold_seconds: float = 120.0,
     ) -> None:
         self.base_ws_url = self._normalize_base_ws_url(base_ws_url)
         if urlparse(self.base_ws_url).hostname != "fstream.binance.com":
@@ -29,6 +30,7 @@ class BinanceWebSocketManager:
         self.timeframe = timeframe
         self.on_candle_closed = on_candle_closed
         self.message_timeout_seconds = message_timeout_seconds
+        self.stale_threshold_seconds = stale_threshold_seconds
         self.symbols: List[str] = []
         self._running = False
         self._tasks: List[asyncio.Task] = []
@@ -38,9 +40,12 @@ class BinanceWebSocketManager:
         self.reconnect_count = 0
         self.last_message_received_at: Optional[float] = None
         self.last_kline_received_at: Optional[float] = None
+        self.last_processed_at: Optional[float] = None
         self.last_candle_time: Optional[int] = None
         self.last_closed_candle_received_at: Optional[float] = None
         self.last_symbol_closed: Optional[str] = None
+        self.subscription_errors_count = 0
+        self.last_subscription_error: Optional[str] = None
         self._active_connections = 0
         self._workers_with_data: set[int] = set()
         self._workers_with_kline: set[int] = set()
@@ -54,20 +59,33 @@ class BinanceWebSocketManager:
         return self.is_connected
 
     def get_market_data_health(self) -> Dict[str, Any]:
-        """Provides fine-grained health metrics separating connection from data reception (Section 8)."""
+        """Provides fine-grained health metrics separating connection from data reception."""
         now = time.time()
         is_conn = self.is_connected
         last_rcv = self.last_kline_received_at
+        last_proc = self.last_processed_at
+
+        # Check if any worker tasks terminated unexpectedly
+        dead_workers = [
+            i for i, t in enumerate(self._tasks)
+            if t.done() and not t.cancelled()
+        ]
 
         if not is_conn:
             status = "DISCONNECTED"
+            is_healthy = False
+        elif dead_workers:
+            status = f"DEGRADED (worker {dead_workers[0]} terminated)"
+            is_healthy = False
+        elif self.subscription_errors_count > 0 and self.total_klines_received == 0:
+            status = f"DEGRADED (subscription error: {self.last_subscription_error})"
             is_healthy = False
         elif last_rcv is None:
             status = "DATA STALE / NO MARKET DATA"
             is_healthy = False
         else:
             elapsed = now - last_rcv
-            if elapsed > 120.0:
+            if elapsed > self.stale_threshold_seconds:
                 status = f"DATA STALE / NO MARKET DATA ({int(elapsed)}s silent)"
                 is_healthy = False
             else:
@@ -80,15 +98,22 @@ class BinanceWebSocketManager:
             "is_connected": is_conn,
             "ws_connected": is_conn,
             "active_connections": self._active_connections,
+            "total_workers": len(self._tasks),
+            "dead_workers_count": len(dead_workers),
+            "total_streams": len(self.symbols),
             "total_messages_received": self.total_messages_received,
             "total_klines_received": self.total_klines_received,
             "candles_closed_count": self.candles_closed_count,
             "last_message_received_at": self.last_message_received_at,
             "last_kline_received_at": last_rcv,
+            "last_processed_at": last_proc,
             "last_closed_candle_time": self.last_candle_time,
             "last_closed_candle_received_at": self.last_closed_candle_received_at,
             "last_symbol_closed": self.last_symbol_closed,
             "reconnect_count": self.reconnect_count,
+            "stale_threshold_seconds": self.stale_threshold_seconds,
+            "subscription_errors_count": self.subscription_errors_count,
+            "last_subscription_error": self.last_subscription_error,
         }
 
     def set_symbols(self, symbols: List[str]) -> None:
@@ -103,6 +128,9 @@ class BinanceWebSocketManager:
         return [symbols[i : i + batch_size] for i in range(0, len(symbols), batch_size)]
 
     async def start(self) -> None:
+        if self._running:
+            logger.warning("WebSocketManager already running; ignoring duplicate start call.")
+            return
         self._running = True
         # Chunk symbols into groups of max 100 streams per connection
         batch_size = 100
@@ -218,6 +246,21 @@ class BinanceWebSocketManager:
         if not isinstance(payload, dict):
             logger.warning("Ignoring malformed WebSocket payload")
             return
+
+        # Check for subscription errors or acknowledgements
+        if "error" in data or "error" in payload:
+            err = data.get("error") or payload.get("error")
+            self.subscription_errors_count += 1
+            self.last_subscription_error = str(err)
+            logger.error("WS_SUBSCRIPTION_ERROR: Received subscription error from Binance: %s", err)
+            self.last_processed_at = time.time()
+            return
+
+        if "result" in data and "id" in data:
+            logger.debug("WS_SUBSCRIPTION_ACK: id=%s result=%s", data.get("id"), data.get("result"))
+            self.last_processed_at = time.time()
+            return
+
         event_type = payload.get("e")
 
         if event_type == "kline":
@@ -241,15 +284,21 @@ class BinanceWebSocketManager:
             except (KeyError, TypeError, ValueError):
                 logger.error("Ignoring malformed Futures kline for %s", symbol)
                 return
+
+            now = time.time()
+            # If feed was previously stale, log recovery
+            if self.last_kline_received_at and (now - self.last_kline_received_at > self.stale_threshold_seconds):
+                logger.info("WS_FEED_RECOVERED: Market data feed resumed after stale period (symbol=%s)", symbol)
+
             self.total_klines_received += 1
-            self.last_kline_received_at = time.time()
+            self.last_kline_received_at = now
             if batch_idx is not None and batch_idx not in self._workers_with_kline:
                 self._workers_with_kline.add(batch_idx)
                 logger.info("KLINE RECEIVED [worker %s] symbol=%s interval=%s", batch_idx, symbol, interval)
             if is_closed and symbol:
                 self.candles_closed_count += 1
                 self.last_candle_time = timestamp
-                self.last_closed_candle_received_at = time.time()
+                self.last_closed_candle_received_at = now
                 self.last_symbol_closed = symbol
 
                 candle_data = {
@@ -269,3 +318,4 @@ class BinanceWebSocketManager:
                         await self.on_candle_closed(symbol, candle_data)
                     except Exception as e:
                         logger.error(f"Error executing candle closed callback for {symbol}: {e}")
+            self.last_processed_at = time.time()
