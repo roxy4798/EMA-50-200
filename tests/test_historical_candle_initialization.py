@@ -473,3 +473,200 @@ async def test_case_12_existing_golden_cross_behavior_remains_unchanged(tmp_path
     assert engine.slow_period == 500
 
     await client.close()
+
+
+# ===========================================================================
+# 13. A symbol in RETRY_PENDING remains retry-pending after receiving a live candle
+#     when exchange history is not exhausted
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_case_13_symbol_in_retry_pending_remains_retry_pending_on_live_candle(tmp_path):
+    engine, client, db, alert_queue = await setup_test_engine(tmp_path)
+    engine.set_symbols(["BTCUSDT"])
+
+    # Simulate temporary partial retrieval: returns 500 candles, NOT exhausted
+    candles_500 = make_candle_sequence(500, start_ts=1700000000000)
+    client.get_klines = AsyncMock(return_value=candles_500)
+    client.is_history_exhausted = MagicMock(return_value=False)
+
+    await engine.initialize_symbols(max_concurrency=1, pacing_delay_ms=0.0)
+
+    # Initial state must be RETRY_PENDING
+    assert engine.get_symbol_state("BTCUSDT") == STATE_RETRY_PENDING
+    assert "BTCUSDT" not in engine.initialized_symbols
+
+    # A live candle arrives via WebSocket
+    next_ts = candles_500[-1]["timestamp"] + 3600_000
+    live_candle = make_candle(next_ts, open_p=100.0, close_p=105.0, is_closed=True)
+    sig = await engine.handle_closed_candle("BTCUSDT", live_candle)
+
+    # Must remain RETRY_PENDING, not WAITING_FOR_HISTORY, not READY
+    assert sig is None
+    assert engine.get_symbol_state("BTCUSDT") == STATE_RETRY_PENDING
+    assert "BTCUSDT" not in engine.initialized_symbols
+    assert len(engine.candles_history["BTCUSDT"]) == 501
+    alert_queue.enqueue.assert_not_called()
+
+    await client.close()
+
+
+# ===========================================================================
+# 14. Discontinuous history does not become WAITING_FOR_HISTORY or READY
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_case_14_discontinuous_history_does_not_become_waiting_or_ready(tmp_path):
+    engine, client, db, alert_queue = await setup_test_engine(tmp_path)
+    engine.set_symbols(["BTCUSDT"])
+
+    # History with a gap
+    candles = make_candle_sequence(500, start_ts=1700000000000)
+    gap_ts = candles[-1]["timestamp"] + 7200_000  # 2-hour gap
+    candles.extend(make_candle_sequence(499, start_ts=gap_ts))  # total 999
+    assert len(candles) == 999
+    assert engine.validate_candle_continuity(candles) is False
+
+    client.get_klines = AsyncMock(return_value=candles)
+    # Even if client erroneously reported exhausted:
+    client.is_history_exhausted = MagicMock(return_value=True)
+
+    await engine.initialize_symbols(max_concurrency=1, pacing_delay_ms=0.0)
+
+    # Must be RETRY_PENDING, not WAITING_FOR_HISTORY
+    assert engine.get_symbol_state("BTCUSDT") == STATE_RETRY_PENDING
+    assert "BTCUSDT" not in engine.initialized_symbols
+
+    # Live candle arrives bringing count to 1000
+    next_ts = candles[-1]["timestamp"] + 3600_000
+    live_candle = make_candle(next_ts, open_p=100.0, close_p=105.0, is_closed=True)
+    sig = await engine.handle_closed_candle("BTCUSDT", live_candle)
+
+    # Must NOT become READY and must NOT evaluate signals due to gap
+    assert sig is None
+    assert engine.get_symbol_state("BTCUSDT") == STATE_RETRY_PENDING
+    assert "BTCUSDT" not in engine.initialized_symbols
+    alert_queue.enqueue.assert_not_called()
+
+    await client.close()
+
+
+# ===========================================================================
+# 15. A symbol with genuinely exhausted exchange history can accumulate candles
+#     and eventually become READY
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_case_15_exhausted_history_accumulates_and_becomes_ready(tmp_path):
+    engine, client, db, alert_queue = await setup_test_engine(tmp_path)
+    engine.set_symbols(["NEWUSDT"])
+
+    candles_998 = make_candle_sequence(998, start_ts=1700000000000)
+    client.get_klines = AsyncMock(return_value=candles_998)
+    client.is_history_exhausted = MagicMock(return_value=True)
+
+    await engine.initialize_symbols(max_concurrency=1, pacing_delay_ms=0.0)
+
+    assert engine.get_symbol_state("NEWUSDT") == STATE_WAITING_FOR_HISTORY
+    assert "NEWUSDT" not in engine.initialized_symbols
+
+    # Accumulate candle 999
+    ts_999 = candles_998[-1]["timestamp"] + 3600_000
+    c_999 = make_candle(ts_999, open_p=100.0, close_p=101.0, is_closed=True)
+    sig1 = await engine.handle_closed_candle("NEWUSDT", c_999)
+    assert sig1 is None
+    assert engine.get_symbol_state("NEWUSDT") == STATE_WAITING_FOR_HISTORY
+    assert "NEWUSDT" not in engine.initialized_symbols
+
+    # Accumulate candle 1000 -> reaches canonical threshold!
+    ts_1000 = ts_999 + 3600_000
+    c_1000 = make_candle(ts_1000, open_p=101.0, close_p=102.0, is_closed=True)
+    sig2 = await engine.handle_closed_candle("NEWUSDT", c_1000)
+
+    # Must transition automatically to READY
+    assert engine.get_symbol_state("NEWUSDT") == STATE_READY
+    assert "NEWUSDT" in engine.initialized_symbols
+    assert len(engine.candles_history["NEWUSDT"]) == 1000
+
+    await client.close()
+
+
+# ===========================================================================
+# 16. A non-empty partial REST response for an established symbol is not
+#     automatically treated as permanent history exhaustion without evidence
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_case_16_partial_rest_for_established_symbol_not_treated_as_exhaustion(tmp_path):
+    engine, client, db, alert_queue = await setup_test_engine(tmp_path)
+    engine.set_symbols(["BTCUSDT"])
+
+    # Established symbol receives partial response (e.g. 700 candles)
+    # Client has not established exhaustion (is_history_exhausted returns False)
+    candles_700 = make_candle_sequence(700, start_ts=1700000000000)
+    client.get_klines = AsyncMock(return_value=candles_700)
+    client.is_history_exhausted = MagicMock(return_value=False)
+
+    await engine.initialize_symbols(max_concurrency=1, pacing_delay_ms=0.0)
+
+    # Must be RETRY_PENDING, not WAITING_FOR_HISTORY
+    assert engine.get_symbol_state("BTCUSDT") == STATE_RETRY_PENDING
+    assert engine.get_symbol_state("BTCUSDT") != STATE_WAITING_FOR_HISTORY
+
+    await client.close()
+
+
+# ===========================================================================
+# 17. Binance pagination and open-candle filtering do not cause false exhaustion
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_case_17_binance_client_pagination_and_open_candle_no_false_exhaustion(monkeypatch):
+    client = BinanceFuturesClient(base_url="https://fapi.binance.com")
+    now_ms = 1800000000000
+    monkeypatch.setattr("app.exchange.binance_client.time.time", lambda: now_ms / 1000.0)
+
+    # Build 1000 candles ending with an open candle
+    raw_page_1 = []
+    base_ts = now_ms - 1000 * 3600_000
+    for i in range(999):
+        ts = base_ts + i * 3600_000
+        raw_page_1.append([ts, 100, 105, 95, 100, 10, ts + 3600_000 - 1])
+    # Open candle
+    open_ts = base_ts + 999 * 3600_000
+    raw_page_1.append([open_ts, 100, 105, 95, 100, 10, now_ms + 1800_000])
+
+    # Backfill page: 10 older candles
+    raw_backfill = []
+    earliest_ts = base_ts
+    for i in range(1, 11):
+        ts = earliest_ts - i * 3600_000
+        raw_backfill.append([ts, 100, 105, 95, 100, 10, ts + 3600_000 - 1])
+
+    call_count = 0
+    class MockResp:
+        def __init__(self, data, status=200):
+            self._data = data
+            self.status = status
+        async def json(self):
+            return self._data
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+
+    class MockSession:
+        def get(self, url, params=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return MockResp(raw_page_1)
+            else:
+                return MockResp(raw_backfill)
+
+    client._get_session = AsyncMock(return_value=MockSession())
+
+    result = await client.get_klines("BTCUSDT", limit=1000, only_closed=True)
+
+    # 999 closed from page 1 + older candles from backfill satisfy limit 1000
+    assert len(result) == 1000
+    assert all(c["close_time"] < now_ms for c in result)
+    # CRITICAL: exchange_exhausted must be False because full limit was satisfied!
+    assert client.is_history_exhausted("BTCUSDT") is False
+
+    await client.close()

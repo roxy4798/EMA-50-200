@@ -216,14 +216,11 @@ class SignalEngine:
                             is_exhausted = False
                             if hasattr(self.binance_client, "is_history_exhausted"):
                                 is_exhausted = bool(self.binance_client.is_history_exhausted(sym))
-                            elif is_continuous and candles and len(candles) < self.candle_limit:
-                                pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
-                                is_exhausted = (pause_rem <= 0.0)
 
                             if not is_continuous and candles:
                                 new_state = STATE_RETRY_PENDING
                                 reason = "Discontinuous candle history (gap detected in timestamp sequence)"
-                            elif is_exhausted:
+                            elif is_exhausted and is_continuous:
                                 new_state = STATE_WAITING_FOR_HISTORY
                                 reason = f"Limited exchange history ({len(candles) if candles else 0}/{self.candle_limit} closed 1H candles available)"
                             else:
@@ -231,15 +228,16 @@ class SignalEngine:
                                 reason = f"Temporary REST failure, partial retrieval, or rate limit ({len(candles) if candles else 0}/{self.candle_limit} candles)"
 
                             # Save available valid candles so live WebSocket can accumulate from them
-                            if candles and is_continuous:
+                            if candles:
                                 df = enrich_candles_with_ema(candles, self.fast_period, self.slow_period)
                                 enriched_candles = df.to_dict(orient="records")
                                 async with self._lock:
                                     self.candles_history[sym] = enriched_candles
-                                await self.database.cache_candles(
-                                    enriched_candles, sym, self.timeframe,
-                                    fast_period=self.fast_period, slow_period=self.slow_period
-                                )
+                                if is_continuous:
+                                    await self.database.cache_candles(
+                                        enriched_candles, sym, self.timeframe,
+                                        fast_period=self.fast_period, slow_period=self.slow_period
+                                    )
 
                             async with self._lock:
                                 self.symbol_states[sym] = new_state
@@ -386,9 +384,6 @@ class SignalEngine:
                         is_exhausted = False
                         if hasattr(self.binance_client, "is_history_exhausted"):
                             is_exhausted = bool(self.binance_client.is_history_exhausted(sym))
-                        elif candles and len(candles) < self.candle_limit:
-                            pause_rem = getattr(self.binance_client, "pause_remaining", 0.0)
-                            is_exhausted = (pause_rem <= 0.0)
 
                         new_state = STATE_WAITING_FOR_HISTORY if (is_exhausted and is_continuous) else STATE_RETRY_PENDING
                         if candles and is_continuous:
@@ -490,20 +485,50 @@ class SignalEngine:
                     slow_period=self.slow_period,
                 )
             else:
-                # Still under candle_limit or discontinuous: fail-closed, NO signal
+                # Under candle_limit OR discontinuous: fail-closed, NO signal
+                # Ensure non-ready / discontinuous symbols are never kept in initialized_symbols
+                self.initialized_symbols.discard(symbol)
+                if resolved_sym != symbol:
+                    self.initialized_symbols.discard(resolved_sym)
+
                 curr_state = self.get_symbol_state(symbol)
-                if curr_state != STATE_READY:
-                    self.symbol_states[symbol] = STATE_WAITING_FOR_HISTORY
-                    if resolved_sym != symbol:
-                        self.symbol_states[resolved_sym] = STATE_WAITING_FOR_HISTORY
-                    self.symbol_details[symbol] = {
-                        "state": STATE_WAITING_FOR_HISTORY,
-                        "candles": len(df),
-                        "reason": f"Accumulating live candles ({len(df)}/{self.candle_limit})",
-                    }
+
+                if not is_continuous:
+                    new_state = STATE_RETRY_PENDING
+                    reason = f"Discontinuous candle history (gap detected in timestamp sequence, {len(df)} candles)"
+                else:
+                    # Continuous history, but len(df) < self.candle_limit
+                    # Only classify as WAITING_FOR_HISTORY if exchange-history exhaustion has been established
+                    is_exhausted = False
+                    if hasattr(self.binance_client, "is_history_exhausted"):
+                        is_exhausted = bool(
+                            self.binance_client.is_history_exhausted(symbol)
+                            or (resolved_sym != symbol and self.binance_client.is_history_exhausted(resolved_sym))
+                        )
+                    elif curr_state == STATE_WAITING_FOR_HISTORY:
+                        is_exhausted = True
+
+                    if curr_state == STATE_RETRY_PENDING:
+                        new_state = STATE_RETRY_PENDING
+                        reason = f"Temporary REST failure or partial retrieval ({len(df)}/{self.candle_limit} candles); awaiting retry"
+                    elif is_exhausted or curr_state == STATE_WAITING_FOR_HISTORY:
+                        new_state = STATE_WAITING_FOR_HISTORY
+                        reason = f"Accumulating live candles ({len(df)}/{self.candle_limit})"
+                    else:
+                        new_state = STATE_RETRY_PENDING
+                        reason = f"Temporary REST failure or partial retrieval ({len(df)}/{self.candle_limit} candles); awaiting retry"
+
+                self.symbol_states[symbol] = new_state
+                if resolved_sym != symbol:
+                    self.symbol_states[resolved_sym] = new_state
+                self.symbol_details[symbol] = {
+                    "state": new_state,
+                    "candles": len(df),
+                    "reason": reason,
+                }
                 logger.debug(
-                    "INSUFFICIENT_HISTORY: %s has %d/%d closed candles. No signal evaluated.",
-                    symbol, len(df), self.candle_limit,
+                    "UNREADY_HISTORY: %s has %d/%d closed candles (continuous=%s, state=%s). No signal evaluated.",
+                    symbol, len(df), self.candle_limit, is_continuous, new_state,
                 )
 
         if signal:

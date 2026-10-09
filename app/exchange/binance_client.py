@@ -201,7 +201,7 @@ class BinanceFuturesClient:
             if not only_closed:
                 result = candles[-limit:]
                 self._fetch_meta[symbol] = {
-                    "exchange_exhausted": len(raw_data) < req_limit,
+                    "exchange_exhausted": (len(raw_data) < req_limit and start_time is None and len(result) < limit),
                     "status": "success",
                     "candles_count": len(result),
                 }
@@ -216,38 +216,39 @@ class BinanceFuturesClient:
                 if int(c["close_time"]) < now_ms
             }
 
-            # Paginate backward to fill the deficit.  The initial Binance
-            # response is capped at 1000 rows.  When it contains the current
+            # Paginate backward to fill the deficit. The initial Binance
+            # response is capped at 1000 rows. When it contains the current
             # open candle we lose one closed row, but the real issue is that
             # 1000 rows is the hard Binance cap -- if a caller needs 1000
-            # *closed* candles the open candle eats one slot.  We paginate
+            # *closed* candles the open candle eats one slot. We paginate
             # backward (using endTime) to collect the shortfall.
             #
             # Stop conditions:
             #   - collected >= limit closed candles
             #   - explicit start_time was provided (no backfill across caller bounds)
-            #   - last page returned < 1000 rows (Binance history exhausted)
+            #   - backfill returned 0 rows (definitively reached exchange listing boundary)
+            #   - backfill returned < 1000 rows (reached earliest available data)
             #   - safety cap of MAX_BACKFILL_PAGES reached
             #
             # Rate-limit handling:
             #   Each backfill page is retried up to MAX_RETRIES_PER_PAGE times
-            #   if a 429/418 is received.  Before each retry we sleep for the
-            #   Retry-After period (capped at MAX_RATE_LIMIT_WAIT_S).  If all
-            #   retries are exhausted the loop breaks and returns partial
-            #   results (fail-closed: SignalEngine rejects <1000).
+            #   if a 429/418 is received. Before each retry we sleep for the
+            #   Retry-After period (capped at MAX_RATE_LIMIT_WAIT_S). If retries
+            #   are exhausted the loop breaks and returns partial results with
+            #   exchange_exhausted=False (fail-closed: SignalEngine marks RETRY_PENDING).
             MAX_BACKFILL_PAGES = 3
             MAX_RETRIES_PER_PAGE = 2
             MAX_RATE_LIMIT_WAIT_S = 30
             last_page_size = len(raw_data)
-            is_exhausted = (last_page_size < req_limit)
+            is_exhausted = (last_page_size < req_limit and start_time is None)
 
             for _ in range(MAX_BACKFILL_PAGES):
                 if len(by_timestamp) >= limit:
                     break
                 if start_time is not None:
                     break
-                if last_page_size < 1000:
-                    # Binance returned fewer than 1000 rows -- no older data.
+                if last_page_size < req_limit:
+                    # Binance returned fewer rows than requested limit -- no older data on exchange.
                     is_exhausted = True
                     break
 
@@ -284,19 +285,31 @@ class BinanceFuturesClient:
                     # Retry-After; the next iteration will honour the wait.
 
                 if backfill_raw is None:
-                    # All retries exhausted — return what we have (fail-closed).
+                    # All retries exhausted — transient failure, NOT permanent exhaustion.
                     is_exhausted = False
                     break
+
                 last_page_size = len(backfill_raw)
-                if last_page_size < 1000:
-                    is_exhausted = True
                 if last_page_size == 0:
+                    # Definitively confirmed: no older candles exist on Binance.
+                    is_exhausted = True
                     break
+
                 for candle in parse_candles(backfill_raw):
                     if int(candle["close_time"]) < now_ms:
                         by_timestamp.setdefault(int(candle["timestamp"]), candle)
 
+                if last_page_size < 1000:
+                    # Last backfill page was partial — reached the listing boundary.
+                    is_exhausted = True
+                    break
+
             result = sorted(by_timestamp.values(), key=lambda c: int(c["timestamp"]))[-limit:]
+            # If the requested candle limit is fully satisfied, or query was bounded by start_time,
+            # history is not considered exhausted for this request.
+            if len(result) >= limit or start_time is not None:
+                is_exhausted = False
+
             self._fetch_meta[symbol] = {
                 "exchange_exhausted": is_exhausted,
                 "status": "success",
