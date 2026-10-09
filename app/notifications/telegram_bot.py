@@ -39,10 +39,14 @@ class TelegramNotifier:
         alert_queue: Optional[Any] = None,
         chart_data_provider: Optional[Any] = None,
         chart_renderer: Optional[Any] = None,
+        fast_period: int = 50,
+        slow_period: int = 200,
     ) -> None:
         self.bot_token = bot_token.strip()
         self.chat_id = chat_id.strip()
         self.enabled = enabled and bool(self.bot_token) and bool(self.chat_id)
+        self.fast_period = fast_period
+        self.slow_period = slow_period
         self._session: Optional[aiohttp.ClientSession] = None
         self._listener_task: Optional[asyncio.Task] = None
         self._commands_registered: bool = False
@@ -67,10 +71,16 @@ class TelegramNotifier:
         alert_queue: Optional[Any] = None,
         chart_data_provider: Optional[Any] = None,
         chart_renderer: Optional[Any] = None,
+        fast_period: Optional[int] = None,
+        slow_period: Optional[int] = None,
     ) -> None:
         """Inject runtime services for dynamic state inspection."""
         if signal_engine is not None:
             self.signal_engine = signal_engine
+            if hasattr(signal_engine, "fast_period"):
+                self.fast_period = signal_engine.fast_period
+            if hasattr(signal_engine, "slow_period"):
+                self.slow_period = signal_engine.slow_period
         if ws_manager is not None:
             self.ws_manager = ws_manager
         if database is not None:
@@ -83,6 +93,10 @@ class TelegramNotifier:
             self.chart_data_provider = chart_data_provider
         if chart_renderer is not None:
             self.chart_renderer = chart_renderer
+        if fast_period is not None:
+            self.fast_period = fast_period
+        if slow_period is not None:
+            self.slow_period = slow_period
 
     @property
     def is_configured(self) -> bool:
@@ -198,13 +212,17 @@ class TelegramNotifier:
 
     def format_alert_message(self, signal: GoldenCrossSignal) -> str:
         """Formats the official Golden Cross alert message matching production specifications."""
+        fast_p = getattr(signal, "fast_period", getattr(self, "fast_period", 50))
+        slow_p = getattr(signal, "slow_period", getattr(self, "slow_period", 200))
+        fast_val = getattr(signal, "ema_fast", getattr(signal, "ema50", 0.0))
+        slow_val = getattr(signal, "ema_slow", getattr(signal, "ema200", 0.0))
         return (
             "NEXORA EMA CROSS\n"
             "🟢 GOLDEN CROSS\n\n"
             f"SYMBOL: {signal.symbol}\n"
             "TIMEFRAME: 1H\n"
-            f"EMA50: {format_price(signal.ema50)}\n"
-            f"EMA200: {format_price(signal.ema200)}\n"
+            f"EMA{fast_p}: {format_price(fast_val)}\n"
+            f"EMA{slow_p}: {format_price(slow_val)}\n"
             f"CANDLE: {signal.candle_status}\n"
             f"TIME: {signal.signal_time_utc}"
         )
@@ -492,7 +510,9 @@ class TelegramNotifier:
 
         try:
             if cmd == "/start":
-                return build_start_view()
+                fast_p = getattr(self.signal_engine, "fast_period", self.fast_period)
+                slow_p = getattr(self.signal_engine, "slow_period", self.slow_period)
+                return build_start_view(fast_period=fast_p, slow_period=slow_p)
 
             elif cmd == "/dashboard":
                 return await build_dashboard_view(
@@ -627,12 +647,12 @@ class TelegramNotifier:
 
             if chart_path and os.path.isfile(chart_path):
                 latest = chart_data.get("latest", {})
-                e50 = latest.get("ema50")
-                e200 = latest.get("ema200")
-                if e50 is not None and e200 is not None:
-                    if e50 > e200:
+                e_fast = latest.get("ema_fast", latest.get("ema50"))
+                e_slow = latest.get("ema_slow", latest.get("ema200"))
+                if e_fast is not None and e_slow is not None:
+                    if e_fast > e_slow:
                         struct = "BULLISH"
-                    elif e50 < e200:
+                    elif e_fast < e_slow:
                         struct = "BEARISH"
                     else:
                         struct = "NEUTRAL"

@@ -36,20 +36,32 @@ async def run_verification():
     assert len(candles) >= 100, "Should fetch at least 100 candles"
     print(f"Latest 1H Candle for {symbol}: Time={candles[-1]['timestamp']}, Close={candles[-1]['close']}")
 
-    print("\n--- 4. Testing ChartDataProvider & EMA Calculations ---")
-    chart_data = ChartDataProvider(binance_client=client, database=db)
+    print(f"\n--- 4. Testing ChartDataProvider & EMA {settings.ema_fast}/{settings.ema_slow} Calculations ---")
+    chart_data = ChartDataProvider(
+        binance_client=client,
+        database=db,
+        fast_period=settings.ema_fast,
+        slow_period=settings.ema_slow,
+    )
     data = await chart_data.get_chart_data(symbol, timeframe="1h", limit=150, force_fresh=True)
     print(f"Chart data generated for {symbol}:")
     print(f"  Total candles: {len(data['candles'])}")
-    print(f"  Total EMA50 points: {len(data['ema50'])}")
-    print(f"  Total EMA200 points: {len(data['ema200'])}")
+    print(f"  Total EMA {settings.ema_fast} points: {len(data.get('ema_fast', data.get('ema50', [])))}")
+    print(f"  Total EMA {settings.ema_slow} points: {len(data.get('ema_slow', data.get('ema200', [])))}")
     print(f"  Detected Golden Crosses: {len(data['cross_markers'])}")
     print(f"  Latest Close: {data['latest']['close']}")
-    print(f"  Latest EMA50: {data['latest']['ema50']}")
-    print(f"  Latest EMA200: {data['latest']['ema200']}")
+    print(f"  Latest EMA {settings.ema_fast}: {data['latest'].get('ema_fast', data['latest'].get('ema50'))}")
+    print(f"  Latest EMA {settings.ema_slow}: {data['latest'].get('ema_slow', data['latest'].get('ema200'))}")
 
     print("\n--- 5. Testing High-Res 1600x900 Chart Image Renderer ---")
-    renderer = ChartRenderer(output_dir="charts", width_px=1600, height_px=900, dpi=100)
+    renderer = ChartRenderer(
+        output_dir="charts",
+        width_px=1600,
+        height_px=900,
+        dpi=100,
+        fast_period=settings.ema_fast,
+        slow_period=settings.ema_slow,
+    )
     img_path = renderer.render_golden_cross_chart(chart_data=data)
     print(f"Rendered chart image at: {img_path}")
     assert img_path is not None and os.path.isfile(img_path), "Chart image should exist on disk"
@@ -57,17 +69,36 @@ async def run_verification():
     print(f"Chart image file size: {img_size:,} bytes")
 
     print("\n--- 6. Testing SignalEngine Historical Cross Scan ---")
-    telegram = TelegramNotifier(enabled=False)
-    alert_queue = AlertQueue(chart_data, renderer, telegram, db)
+    telegram = TelegramNotifier(
+        enabled=False,
+        fast_period=settings.ema_fast,
+        slow_period=settings.ema_slow,
+    )
+    alert_queue = AlertQueue(
+        chart_data,
+        renderer,
+        telegram,
+        db,
+        fast_period=settings.ema_fast,
+        slow_period=settings.ema_slow,
+    )
     alert_queue.start()
 
-    engine = SignalEngine(client, db, alert_queue)
+    engine = SignalEngine(
+        client,
+        db,
+        alert_queue,
+        timeframe=settings.timeframe,
+        fast_period=settings.ema_fast,
+        slow_period=settings.ema_slow,
+        candle_limit=settings.candle_limit,
+    )
     engine.set_symbols(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     await engine.initialize_symbols()
     crosses = await engine.scan_and_record_historical_crosses("BTCUSDT")
     print(f"Historical Golden Crosses found in BTCUSDT dataset: {len(crosses)}")
     for c in crosses:
-        print(f"  * Cross at {c.signal_time_utc} | Price: {c.close_price} | EMA50: {c.ema50:.2f} | EMA200: {c.ema200:.2f}")
+        print(f"  * Cross at {c.signal_time_utc} | Price: {c.close_price} | EMA {c.fast_period}: {c.ema_fast:.2f} | EMA {c.slow_period}: {c.ema_slow:.2f}")
 
     print("\n--- 7. Testing Alert Queue & Non-Blocking Worker ---")
     if crosses:

@@ -67,12 +67,16 @@ async def main() -> None:
         binance_client=binance_client,
         database=db,
         cache_ttl_seconds=settings.cache_ttl_seconds,
+        fast_period=settings.ema_fast,
+        slow_period=settings.ema_slow,
     )
     chart_renderer = ChartRenderer(
         output_dir=settings.charts_dir,
         width_px=settings.chart_width,
         height_px=settings.chart_height,
         dpi=settings.chart_dpi,
+        fast_period=settings.ema_fast,
+        slow_period=settings.ema_slow,
     )
 
     # 4. Initialize Telegram Notifier
@@ -80,6 +84,8 @@ async def main() -> None:
         bot_token=settings.telegram_bot_token,
         chat_id=settings.telegram_chat_id,
         enabled=settings.telegram_enabled,
+        fast_period=settings.ema_fast,
+        slow_period=settings.ema_slow,
     )
 
     # 5. Initialize Alert Queue
@@ -88,6 +94,8 @@ async def main() -> None:
         chart_renderer=chart_renderer,
         telegram_notifier=telegram_notifier,
         database=db,
+        fast_period=settings.ema_fast,
+        slow_period=settings.ema_slow,
     )
     alert_queue.start()
 

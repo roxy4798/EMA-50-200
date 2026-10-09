@@ -167,6 +167,9 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     const ema50Series = ema50SeriesRef.current;
     const ema200Series = ema200SeriesRef.current;
 
+    const fastPeriod = chartData?.fast_period ?? 50;
+    const slowPeriod = chartData?.slow_period ?? 200;
+
     // Format for Lightweight charts (time must be strictly ascending)
     const candles = chartData.candles.map((c) => ({
       time: c.time as Time,
@@ -177,20 +180,24 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     }));
     candleSeries.setData(candles);
 
-    if (ema50Series && chartData.ema50) {
-      const ema50 = chartData.ema50.map((e) => ({
+    const fastData = chartData.ema_fast || chartData.ema50;
+    if (ema50Series && fastData) {
+      ema50Series.applyOptions({ title: `EMA ${fastPeriod}` });
+      const emaFast = fastData.map((e) => ({
         time: e.time as Time,
         value: e.value,
       }));
-      ema50Series.setData(ema50);
+      ema50Series.setData(emaFast);
     }
 
-    if (ema200Series && chartData.ema200) {
-      const ema200 = chartData.ema200.map((e) => ({
+    const slowData = chartData.ema_slow || chartData.ema200;
+    if (ema200Series && slowData) {
+      ema200Series.applyOptions({ title: `EMA ${slowPeriod}` });
+      const emaSlow = slowData.map((e) => ({
         time: e.time as Time,
         value: e.value,
       }));
-      ema200Series.setData(ema200);
+      ema200Series.setData(emaSlow);
     }
 
     // Set Golden Cross Markers
@@ -219,9 +226,11 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     }
   }, [chartData, selectedTimestamp]);
 
+  const fastPeriod = chartData?.fast_period ?? 50;
+  const slowPeriod = chartData?.slow_period ?? 200;
   const latest = chartData?.latest;
-  const activeEma50 = hoveredData?.ema50 ?? latest?.ema50;
-  const activeEma200 = hoveredData?.ema200 ?? latest?.ema200;
+  const activeEmaFast = hoveredData?.ema50 ?? (latest?.ema_fast ?? latest?.ema50);
+  const activeEmaSlow = hoveredData?.ema200 ?? (latest?.ema_slow ?? latest?.ema200);
   const activeClose = hoveredData?.close ?? latest?.close;
 
   const handleDownloadPNG = () => {
@@ -250,7 +259,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
             </span>
             <span style={{ color: 'var(--text-dim)' }}>|</span>
             <span style={{ color: 'var(--text-muted)' }}>
-              SIGNAL: <strong style={{ color: 'var(--color-cyan)' }}>EMA50 CROSS ABOVE EMA200</strong>
+              SIGNAL: <strong style={{ color: 'var(--color-cyan)' }}>EMA{fastPeriod} CROSS ABOVE EMA{slowPeriod}</strong>
             </span>
             <span style={{ color: 'var(--text-dim)' }}>|</span>
             <span style={{ color: 'var(--color-green)', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 700 }}>
@@ -312,16 +321,16 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         </div>
 
         <div>
-          <div style={{ fontSize: '10px', color: 'var(--color-cyan)', fontWeight: 600 }}>EMA 50</div>
+          <div style={{ fontSize: '10px', color: 'var(--color-cyan)', fontWeight: 600 }}>EMA {fastPeriod}</div>
           <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--color-cyan)', fontFamily: 'JetBrains Mono' }}>
-            {formatPrice(activeEma50)}
+            {formatPrice(activeEmaFast)}
           </div>
         </div>
 
         <div>
-          <div style={{ fontSize: '10px', color: 'var(--color-gold)', fontWeight: 600 }}>EMA 200</div>
+          <div style={{ fontSize: '10px', color: 'var(--color-gold)', fontWeight: 600 }}>EMA {slowPeriod}</div>
           <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--color-gold)', fontFamily: 'JetBrains Mono' }}>
-            {formatPrice(activeEma200)}
+            {formatPrice(activeEmaSlow)}
           </div>
         </div>
 
@@ -352,11 +361,11 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           <span>H: <strong style={{ color: '#00E676' }}>{formatPrice(hoveredData.high)}</strong></span>
           <span>L: <strong style={{ color: '#FF3366' }}>{formatPrice(hoveredData.low)}</strong></span>
           <span>C: <strong style={{ color: '#FFFFFF' }}>{formatPrice(hoveredData.close)}</strong></span>
-          {hoveredData.ema50 && (
-            <span>EMA50: <strong style={{ color: 'var(--color-cyan)' }}>{formatPrice(hoveredData.ema50)}</strong></span>
+          {activeEmaFast && (
+            <span>EMA{fastPeriod}: <strong style={{ color: 'var(--color-cyan)' }}>{formatPrice(activeEmaFast)}</strong></span>
           )}
-          {hoveredData.ema200 && (
-            <span>EMA200: <strong style={{ color: 'var(--color-gold)' }}>{formatPrice(hoveredData.ema200)}</strong></span>
+          {activeEmaSlow && (
+            <span>EMA{slowPeriod}: <strong style={{ color: 'var(--color-gold)' }}>{formatPrice(activeEmaSlow)}</strong></span>
           )}
         </div>
       )}
@@ -391,11 +400,11 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span style={{ width: '12px', height: '3px', background: 'var(--color-cyan)', display: 'inline-block' }}></span>
-            <span style={{ color: 'var(--text-muted)' }}>EMA 50 (Fast)</span>
+            <span style={{ color: 'var(--text-muted)' }}>EMA {fastPeriod} (Fast)</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span style={{ width: '12px', height: '3px', background: 'var(--color-gold)', display: 'inline-block' }}></span>
-            <span style={{ color: 'var(--text-muted)' }}>EMA 200 (Slow)</span>
+            <span style={{ color: 'var(--text-muted)' }}>EMA {slowPeriod} (Slow)</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span style={{ color: 'var(--color-cyan)' }}>▲</span>

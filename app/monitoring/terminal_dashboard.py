@@ -82,10 +82,12 @@ class TerminalDashboard:
         uptime_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
         # 1. Header Banner (Section 24)
+        fast_p = self.signal_engine.fast_period
+        slow_p = self.signal_engine.slow_period
         header_text = Text()
         header_text.append("  NEXORA EMA CROSS  ", style="bold white on dark_blue")
         header_text.append(" • BINANCE USD-M FUTURES\n", style="bold cyan")
-        header_text.append("  MODE: LONG ONLY  |  SIGNAL: EMA50 CROSS ABOVE EMA200  |  TIMEFRAME: 1H\n", style="bold yellow")
+        header_text.append(f"  MODE: LONG ONLY  |  SIGNAL: EMA{fast_p} CROSS ABOVE EMA{slow_p}  |  TIMEFRAME: 1H\n", style="bold yellow")
         header_text.append(f"  WEB DASHBOARD & CHART: http://localhost:{self.port}", style="green")
 
         header_panel = Panel(header_text, border_style="cyan", padding=(0, 1))
@@ -170,8 +172,8 @@ class TerminalDashboard:
         signals_table.add_column("SYMBOL", style="bold white", width=12)
         signals_table.add_column("TIME (UTC)", style="cyan", width=22)
         signals_table.add_column("CLOSE PRICE", style="white", justify="right", width=16)
-        signals_table.add_column("EMA 50", style="bright_cyan", justify="right", width=16)
-        signals_table.add_column("EMA 200", style="bright_yellow", justify="right", width=16)
+        signals_table.add_column(f"EMA {fast_p}", style="bright_cyan", justify="right", width=16)
+        signals_table.add_column(f"EMA {slow_p}", style="bright_yellow", justify="right", width=16)
         signals_table.add_column("SIGNAL STATUS", style="bold green", width=24)
 
         if recent_signals:
@@ -180,8 +182,8 @@ class TerminalDashboard:
                     s["symbol"],
                     s["signal_time_utc"],
                     format_price(s["close_price"]),
-                    format_price(s["ema50"]),
-                    format_price(s["ema200"]),
+                    format_price(s.get("ema_fast", s.get("ema50", 0.0))),
+                    format_price(s.get("ema_slow", s.get("ema200", 0.0))),
                     "● GOLDEN CROSS CONFIRMED",
                 )
         else:
@@ -193,8 +195,8 @@ class TerminalDashboard:
         sym_table = Table(box=None, expand=True)
         sym_table.add_column("SYMBOL", style="bold white", width=12)
         sym_table.add_column("LAST 1H CLOSE", style="white", justify="right", width=16)
-        sym_table.add_column("EMA 50", style="bright_cyan", justify="right", width=16)
-        sym_table.add_column("EMA 200", style="bright_yellow", justify="right", width=16)
+        sym_table.add_column(f"EMA {fast_p}", style="bright_cyan", justify="right", width=16)
+        sym_table.add_column(f"EMA {slow_p}", style="bright_yellow", justify="right", width=16)
         sym_table.add_column("SPREAD", style="cyan", justify="right", width=16)
 
         for sym in self.signal_engine.symbols[:6]:
@@ -202,14 +204,14 @@ class TerminalDashboard:
             if history:
                 last_c = history[-1]
                 close_p = last_c.get("close", 0.0)
-                e50 = last_c.get("ema_50", 0.0)
-                e200 = last_c.get("ema_200", 0.0)
-                spread = ((e50 - e200) / e200 * 100) if e200 and e50 else 0.0
+                e_fast = last_c.get("ema_fast", last_c.get(f"ema_{fast_p}", last_c.get("ema_50", 0.0)))
+                e_slow = last_c.get("ema_slow", last_c.get(f"ema_{slow_p}", last_c.get("ema_200", 0.0)))
+                spread = ((e_fast - e_slow) / e_slow * 100) if e_slow and e_fast else 0.0
                 sym_table.add_row(
                     sym,
                     format_price(close_p),
-                    format_price(e50) if e50 else "-",
-                    format_price(e200) if e200 else "-",
+                    format_price(e_fast) if e_fast else "-",
+                    format_price(e_slow) if e_slow else "-",
                     f"{spread:+.2f}%",
                 )
             else:

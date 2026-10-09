@@ -6,13 +6,20 @@ interface CrossHistoryProps {
   signals: RecentSignal[];
   onSelectEvent: (symbol: string, timestamp: number) => void;
   selectedSignalId?: number;
+  fastPeriod?: number;
+  slowPeriod?: number;
 }
 
 export const CrossHistory: React.FC<CrossHistoryProps> = ({
   signals,
   onSelectEvent,
   selectedSignalId,
+  fastPeriod,
+  slowPeriod,
 }) => {
+  const displayFast = fastPeriod ?? signals[0]?.fast_period ?? 50;
+  const displaySlow = slowPeriod ?? signals[0]?.slow_period ?? 200;
+
   return (
     <div className="glass-panel" style={{ borderRadius: '8px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '10px' }}>
@@ -35,14 +42,16 @@ export const CrossHistory: React.FC<CrossHistoryProps> = ({
               <th style={{ padding: '8px 10px', fontWeight: 600 }}>TIMEFRAME</th>
               <th style={{ padding: '8px 10px', fontWeight: 600 }}>EVENT TIME (UTC)</th>
               <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>CLOSE PRICE</th>
-              <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>EMA 50</th>
-              <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>EMA 200</th>
+              <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>EMA {displayFast}</th>
+              <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>EMA {displaySlow}</th>
               <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'center' }}>CHART</th>
             </tr>
           </thead>
           <tbody>
             {signals.map((sig) => {
               const isSelected = sig.id === selectedSignalId;
+              const emaFastVal = sig.ema_fast ?? sig.ema50;
+              const emaSlowVal = sig.ema_slow ?? sig.ema200;
               return (
                 <tr
                   key={sig.id}
@@ -73,10 +82,10 @@ export const CrossHistory: React.FC<CrossHistoryProps> = ({
                     {formatPrice(sig.close_price)}
                   </td>
                   <td style={{ padding: '9px 10px', textAlign: 'right', color: 'var(--color-cyan)', fontFamily: 'JetBrains Mono' }}>
-                    {formatPrice(sig.ema50)}
+                    {formatPrice(emaFastVal)}
                   </td>
                   <td style={{ padding: '9px 10px', textAlign: 'right', color: 'var(--color-gold)', fontFamily: 'JetBrains Mono' }}>
-                    {formatPrice(sig.ema200)}
+                    {formatPrice(emaSlowVal)}
                   </td>
                   <td style={{ padding: '9px 10px', textAlign: 'center' }}>
                     <span className="badge-cyan" style={{ fontSize: '10.5px', padding: '3px 8px', borderRadius: '4px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>

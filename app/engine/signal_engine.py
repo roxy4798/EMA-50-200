@@ -38,8 +38,15 @@ class SignalEngine:
         self.timeframe = timeframe.lower()
         if self.timeframe != "1h":
             raise ValueError("NEXORA SignalEngine supports the 1h timeframe only")
-        if fast_period != 50 or slow_period != 200 or candle_limit != 1000:
-            raise ValueError("NEXORA canonical frame is fixed at EMA50/EMA200 with 1000 closed 1H candles")
+        if fast_period <= 0 or slow_period <= 0 or fast_period >= slow_period:
+            raise ValueError(
+                f"Invalid EMA configuration: fast_period={fast_period}, slow_period={slow_period}. "
+                "fast_period must be positive and strictly less than slow_period."
+            )
+        if candle_limit < 1000:
+            raise ValueError(
+                f"NEXORA canonical frame requires at least 1000 closed 1H candles for convergence (got {candle_limit})"
+            )
         self.fast_period = fast_period
         self.slow_period = slow_period
         self.candle_limit = candle_limit
@@ -135,7 +142,10 @@ class SignalEngine:
                                         int(enriched_candles[-1]["timestamp"]),
                                     )
                             # Cache into DB
-                            await self.database.cache_candles(enriched_candles, sym, self.timeframe)
+                            await self.database.cache_candles(
+                                enriched_candles, sym, self.timeframe,
+                                fast_period=self.fast_period, slow_period=self.slow_period
+                            )
                             break
                         else:
                             if attempt < 3:
@@ -200,6 +210,8 @@ class SignalEngine:
                     timeframe=self.timeframe,
                     fast_col=f"ema_{self.fast_period}",
                     slow_col=f"ema_{self.slow_period}",
+                    fast_period=self.fast_period,
+                    slow_period=self.slow_period,
                 )
             else:
                 logger.debug(
@@ -227,6 +239,10 @@ class SignalEngine:
                 "close_price": signal.close_price,
                 "ema50": signal.ema50,
                 "ema200": signal.ema200,
+                "ema_fast": signal.ema_fast,
+                "ema_slow": signal.ema_slow,
+                "fast_period": self.fast_period,
+                "slow_period": self.slow_period,
                 "is_live": True,
             }
 
@@ -243,6 +259,8 @@ class SignalEngine:
                 is_live=True,
                 previous_ema50=signal.previous_ema50,
                 previous_ema200=signal.previous_ema200,
+                fast_period=self.fast_period,
+                slow_period=self.slow_period,
             )
             signal_id = await self.database.save_signal(record)
 
@@ -260,7 +278,15 @@ class SignalEngine:
             return []
 
         df = enrich_candles_with_ema(history, self.fast_period, self.slow_period)
-        crosses = find_all_golden_crosses(df, symbol=symbol, timeframe=self.timeframe)
+        crosses = find_all_golden_crosses(
+            df,
+            symbol=symbol,
+            timeframe=self.timeframe,
+            fast_col=f"ema_{self.fast_period}",
+            slow_col=f"ema_{self.slow_period}",
+            fast_period=self.fast_period,
+            slow_period=self.slow_period,
+        )
 
         if crosses:
             records = [
@@ -276,6 +302,8 @@ class SignalEngine:
                     is_live=False,
                     previous_ema50=c.previous_ema50,
                     previous_ema200=c.previous_ema200,
+                    fast_period=self.fast_period,
+                    slow_period=self.slow_period,
                 )
                 for c in crosses
             ]
@@ -293,6 +321,10 @@ class SignalEngine:
                         "close_price": crosses[-1].close_price,
                         "ema50": crosses[-1].ema50,
                         "ema200": crosses[-1].ema200,
+                        "ema_fast": crosses[-1].ema_fast,
+                        "ema_slow": crosses[-1].ema_slow,
+                        "fast_period": self.fast_period,
+                        "slow_period": self.slow_period,
                         "is_live": False,
                     }
 

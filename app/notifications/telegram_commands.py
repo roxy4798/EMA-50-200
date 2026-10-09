@@ -24,13 +24,13 @@ COMMANDS_MENU = [
 ]
 
 
-def build_start_view() -> Tuple[str, Dict[str, Any]]:
+def build_start_view(fast_period: int = 50, slow_period: int = 200) -> Tuple[str, Dict[str, Any]]:
     """Builds /start welcome screen with inline navigation."""
     text = (
         "NEXORA EMA CROSS\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "Real-time Binance Futures\n"
-        "EMA 50 / EMA 200 Golden Cross Monitor\n\n"
+        f"EMA {fast_period} / EMA {slow_period} Golden Cross Monitor\n\n"
         "TIMEFRAME   1H\n"
         "SIGNAL      LONG ONLY\n"
         "UNIVERSE    USDT PERPETUALS\n\n"
@@ -269,31 +269,34 @@ async def build_symbol_view(
     # Current structure always comes from the newest closed USD-M Futures REST
     # frame. Do not silently present cached/in-memory values as current when REST
     # is unavailable.
+    fast_p = signal_engine.fast_period if signal_engine and hasattr(signal_engine, "fast_period") else 50
+    slow_p = signal_engine.slow_period if signal_engine and hasattr(signal_engine, "slow_period") else 200
+
     candles = []
     if binance_client:
         klines = await binance_client.get_klines(resolved, interval="1h", limit=1000, only_closed=True)
         if klines:
-            df = enrich_candles_with_ema(klines, 50, 200)
+            df = enrich_candles_with_ema(klines, fast_p, slow_p)
             candles = df.to_dict(orient="records")
 
     ema_section = ""
     if candles and len(candles) >= 2:
         last_c = candles[-1]
         prev_c = candles[-2]
-        ema50 = last_c.get("ema_50")
-        ema200 = last_c.get("ema_200")
-        prev_ema50 = prev_c.get("ema_50")
-        prev_ema200 = prev_c.get("ema_200")
+        ema_fast = last_c.get("ema_fast", last_c.get(f"ema_{fast_p}", last_c.get("ema_50")))
+        ema_slow = last_c.get("ema_slow", last_c.get(f"ema_{slow_p}", last_c.get("ema_200")))
+        prev_ema_fast = prev_c.get("ema_fast", prev_c.get(f"ema_{fast_p}", prev_c.get("ema_50")))
+        prev_ema_slow = prev_c.get("ema_slow", prev_c.get(f"ema_{slow_p}", prev_c.get("ema_200")))
         close_price = last_c.get("close", 0.0)
         ts = int(last_c.get("timestamp", 0))
         dt_str = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).strftime("%d %b %Y • %H:%M UTC")
 
-        if ema50 is not None and ema200 is not None and not (isinstance(ema50, float) and ema50 != ema50):
-            if prev_ema50 is not None and prev_ema200 is not None and prev_ema50 <= prev_ema200 and ema50 > ema200:
+        if ema_fast is not None and ema_slow is not None and not (isinstance(ema_fast, float) and ema_fast != ema_fast):
+            if prev_ema_fast is not None and prev_ema_slow is not None and prev_ema_fast <= prev_ema_slow and ema_fast > ema_slow:
                 signal_val = "GOLDEN CROSS CONFIRMED"
-            elif ema50 > ema200:
+            elif ema_fast > ema_slow:
                 signal_val = "BULLISH"
-            elif ema50 < ema200:
+            elif ema_fast < ema_slow:
                 signal_val = "BEARISH"
             else:
                 signal_val = "NEUTRAL"
@@ -302,8 +305,8 @@ async def build_symbol_view(
                 "EMA STRUCTURE (1H CLOSED CANDLE)\n"
                 f"Time      {dt_str}\n"
                 f"Close     {format_price(close_price)}\n"
-                f"EMA 50    {format_price(ema50)}\n"
-                f"EMA 200   {format_price(ema200)}\n\n"
+                f"EMA {fast_p}    {format_price(ema_fast)}\n"
+                f"EMA {slow_p}   {format_price(ema_slow)}\n\n"
                 f"SIGNAL\n{signal_val}\n\n"
             )
         else:

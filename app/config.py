@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import List
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 
 class Settings(BaseSettings):
@@ -18,10 +18,40 @@ class Settings(BaseSettings):
     ema_slow: int = Field(default=200)
     candle_limit: int = Field(default=1000)
 
+    @field_validator("timeframe", mode="after")
+    @classmethod
+    def validate_timeframe(cls, v: str) -> str:
+        if v.lower() != "1h":
+            raise ValueError("NEXORA supports 1h timeframe only")
+        return v.lower()
+
+    @field_validator("ema_fast", mode="after")
+    @classmethod
+    def validate_ema_fast(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("EMA fast period must be positive")
+        return v
+
+    @field_validator("ema_slow", mode="after")
+    @classmethod
+    def validate_ema_slow(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("EMA slow period must be positive")
+        return v
+
     @field_validator("candle_limit", mode="after")
     @classmethod
     def validate_candle_limit(cls, v: int) -> int:
-        return 1000
+        # Maintain at least 1000 closed candles requirement regardless of legacy .env value
+        return max(1000, v)
+
+    @model_validator(mode="after")
+    def validate_ema_cross_periods(self) -> Settings:
+        if self.ema_fast >= self.ema_slow:
+            raise ValueError(
+                f"EMA fast period ({self.ema_fast}) must be strictly less than slow period ({self.ema_slow})"
+            )
+        return self
 
     # Symbol filtering
     symbols: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,NEARUSDT,SUIUSDT,APTUSDT,ARBUSDT,OPUSDT,1000PEPEUSDT")

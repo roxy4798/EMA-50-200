@@ -22,11 +22,15 @@ class AlertQueue:
         chart_renderer: ChartRenderer,
         telegram_notifier: TelegramNotifier,
         database: Database,
+        fast_period: int = 50,
+        slow_period: int = 200,
     ) -> None:
         self.chart_data_provider = chart_data_provider
         self.chart_renderer = chart_renderer
         self.telegram_notifier = telegram_notifier
         self.database = database
+        self.fast_period = fast_period
+        self.slow_period = slow_period
 
         self._queue: asyncio.Queue[Tuple[int, GoldenCrossSignal]] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
@@ -49,7 +53,7 @@ class AlertQueue:
             except asyncio.CancelledError:
                 pass
             self._worker_task = None
-        logger.info("AlertQueue worker stopped.")
+            logger.info("AlertQueue worker stopped.")
 
     async def enqueue(self, signal_id: int, signal: GoldenCrossSignal) -> None:
         """Enqueues a signal without blocking the caller."""
@@ -72,6 +76,9 @@ class AlertQueue:
         """Processes a single alert: validates canonical cross on 1000 candles, renders chart, sends telegram, updates database."""
         chart_path: Optional[str] = None
         try:
+            fast_p = getattr(signal, "fast_period", self.fast_period)
+            slow_p = getattr(signal, "slow_period", self.slow_period)
+
             # 1. Fetch centered chart data using 1000 closed candles from REST
             chart_data = await self.chart_data_provider.get_chart_data(
                 symbol=signal.symbol,
@@ -79,6 +86,8 @@ class AlertQueue:
                 limit=150,
                 target_timestamp=signal.candle_timestamp,
                 force_fresh=True,
+                fast_period=fast_p,
+                slow_period=slow_p,
             )
 
             # 2. Independent Canonical Fail-Closed Validation Guard:
@@ -106,17 +115,20 @@ class AlertQueue:
             curr_candle = df.iloc[target_pos]
             prev_candle = df.iloc[target_pos - 1]
 
-            curr_ema50 = float(curr_candle.get("ema_50", 0.0))
-            curr_ema200 = float(curr_candle.get("ema_200", 0.0))
-            prev_ema50 = float(prev_candle.get("ema_50", 0.0))
-            prev_ema200 = float(prev_candle.get("ema_200", 0.0))
+            fast_col = f"ema_{fast_p}"
+            slow_col = f"ema_{slow_p}"
 
-            is_valid_canonical_cross = (prev_ema50 <= prev_ema200) and (curr_ema50 > curr_ema200)
+            curr_fast = float(curr_candle.get(fast_col, curr_candle.get("ema_fast", curr_candle.get("ema_50", 0.0))))
+            curr_slow = float(curr_candle.get(slow_col, curr_candle.get("ema_slow", curr_candle.get("ema_200", 0.0))))
+            prev_fast = float(prev_candle.get(fast_col, prev_candle.get("ema_fast", prev_candle.get("ema_50", 0.0))))
+            prev_slow = float(prev_candle.get(slow_col, prev_candle.get("ema_slow", prev_candle.get("ema_200", 0.0))))
+
+            is_valid_canonical_cross = (prev_fast <= prev_slow) and (curr_fast > curr_slow)
             if not is_valid_canonical_cross:
                 logger.error(
                     f"ALERT_ABORTED_FAIL_CLOSED: {signal.symbol} at {target_ts} failed independent canonical "
-                    f"1000-candle validation (prev: {prev_ema50:.6f} vs {prev_ema200:.6f}, "
-                    f"curr: {curr_ema50:.6f} vs {curr_ema200:.6f}). Alert dropped."
+                    f"1000-candle validation (prev: {prev_fast:.6f} vs {prev_slow:.6f}, "
+                    f"curr: {curr_fast:.6f} vs {curr_slow:.6f}). Alert dropped."
                 )
                 self.total_failed += 1
                 return

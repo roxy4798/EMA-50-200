@@ -31,6 +31,22 @@ class NexoraChartTheme:
     ema200_color: str = "#FFA000"     # Rich amber gold accent
     ema200_width: float = 2.0
 
+    @property
+    def ema_fast_color(self) -> str:
+        return self.ema50_color
+
+    @property
+    def ema_slow_color(self) -> str:
+        return self.ema200_color
+
+    @property
+    def ema_fast_width(self) -> float:
+        return self.ema50_width
+
+    @property
+    def ema_slow_width(self) -> float:
+        return self.ema200_width
+
     # Cross Marker
     cross_marker_color: str = "#00E5FF"
     cross_badge_bg: str = "#00363A"

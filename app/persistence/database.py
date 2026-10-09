@@ -279,13 +279,33 @@ class Database:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
-    async def cache_candles(self, candles: List[Dict[str, Any]], symbol: str, timeframe: str = "1h") -> None:
+    async def cache_candles(
+        self,
+        candles: List[Dict[str, Any]],
+        symbol: str,
+        timeframe: str = "1h",
+        fast_period: int = 50,
+        slow_period: int = 200,
+    ) -> None:
         """Batch upsert candles into cache."""
         if not candles:
             return
 
+        def _to_float(v: Any) -> Optional[float]:
+            if v is not None:
+                try:
+                    f = float(v)
+                    return None if (f != f) else f
+                except (ValueError, TypeError):
+                    return None
+            return None
+
+        fast_key = f"ema_{fast_period}"
+        slow_key = f"ema_{slow_period}"
         records = []
         for c in candles:
+            fast_val = _to_float(c.get(fast_key, c.get("ema_50", c.get("ema_fast"))))
+            slow_val = _to_float(c.get(slow_key, c.get("ema_200", c.get("ema_slow"))))
             records.append((
                 symbol.upper(),
                 timeframe.upper(),
@@ -295,8 +315,8 @@ class Database:
                 float(c["low"]),
                 float(c["close"]),
                 float(c.get("volume", 0.0)),
-                float(c["ema_50"]) if "ema_50" in c and c["ema_50"] is not None and not (isinstance(c["ema_50"], float) and c["ema_50"] != c["ema_50"]) else None,
-                float(c["ema_200"]) if "ema_200" in c and c["ema_200"] is not None and not (isinstance(c["ema_200"], float) and c["ema_200"] != c["ema_200"]) else None,
+                fast_val,
+                slow_val,
             ))
 
         async with self._lock:
@@ -326,7 +346,8 @@ class Database:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
-                SELECT timestamp, open, high, low, close, volume, ema50 as ema_50, ema200 as ema_200
+                SELECT timestamp, open, high, low, close, volume, ema50 as ema_50, ema200 as ema_200,
+                       ema50 as ema_fast, ema200 as ema_slow
                 FROM candle_cache
                 WHERE symbol = ? AND timeframe = ?
                 ORDER BY timestamp DESC

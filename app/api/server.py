@@ -70,7 +70,7 @@ def create_app(
 
         return {
             "mode": "LONG ONLY",
-            "signal": "EMA50 CROSS ABOVE EMA200",
+            "signal": f"EMA{signal_engine.fast_period} CROSS ABOVE EMA{signal_engine.slow_period}",
             "binance": "ONLINE",
             "websocket": "CONNECTED" if ws_manager.is_connected else "RECONNECTING",
             "market_data": market_data_health["status"],
@@ -136,8 +136,12 @@ def create_app(
             "symbol": data["symbol"],
             "timeframe": data["timeframe"],
             "candles": data["candles"],
-            "ema50": data["ema50"],
-            "ema200": data["ema200"],
+            "ema50": data.get("ema50"),
+            "ema200": data.get("ema200"),
+            "ema_fast": data.get("ema_fast", data.get("ema50")),
+            "ema_slow": data.get("ema_slow", data.get("ema200")),
+            "fast_period": data.get("fast_period", signal_engine.fast_period),
+            "slow_period": data.get("slow_period", signal_engine.slow_period),
             "cross_markers": data["cross_markers"],
             "latest": data["latest"],
         }

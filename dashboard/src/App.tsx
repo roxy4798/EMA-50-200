@@ -128,6 +128,8 @@ export const App: React.FC = () => {
         <CrossHistory
           signals={recentSignals}
           onSelectEvent={handleSelectEvent}
+          fastPeriod={status?.ema_fast}
+          slowPeriod={status?.ema_slow}
         />
       </main>
 

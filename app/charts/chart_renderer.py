@@ -30,11 +30,15 @@ class ChartRenderer:
         width_px: int = 1600,
         height_px: int = 900,
         dpi: int = 100,
+        fast_period: int = 50,
+        slow_period: int = 200,
     ) -> None:
         self.output_dir = output_dir
         self.width_px = width_px
         self.height_px = height_px
         self.dpi = dpi
+        self.fast_period = fast_period
+        self.slow_period = slow_period
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
 
     def render_golden_cross_chart(
@@ -51,6 +55,10 @@ class ChartRenderer:
         try:
             symbol = chart_data.get("symbol", "UNKNOWN")
             timeframe = chart_data.get("timeframe", "1H")
+            fast_p = chart_data.get("fast_period", self.fast_period)
+            slow_p = chart_data.get("slow_period", self.slow_period)
+            fast_col = f"ema_{fast_p}"
+            slow_col = f"ema_{slow_p}"
             df = chart_data.get("df")
 
             if df is None or len(df) < 5:
@@ -140,25 +148,27 @@ class ChartRenderer:
                     ax_main.add_patch(rect)
 
             # Draw EMA Lines
-            if "ema_50" in df.columns:
-                valid_ema50 = df["ema_50"].dropna()
+            active_fast_col = fast_col if fast_col in df.columns else ("ema_fast" if "ema_fast" in df.columns else ("ema_50" if "ema_50" in df.columns else None))
+            if active_fast_col:
+                valid_fast = df[active_fast_col].dropna()
                 ax_main.plot(
-                    df.loc[valid_ema50.index, "idx"],
-                    valid_ema50,
-                    color=THEME.ema50_color,
-                    linewidth=THEME.ema50_width,
-                    label="EMA 50",
+                    df.loc[valid_fast.index, "idx"],
+                    valid_fast,
+                    color=THEME.ema_fast_color,
+                    linewidth=THEME.ema_fast_width,
+                    label=f"EMA {fast_p}",
                     zorder=4,
                 )
 
-            if "ema_200" in df.columns:
-                valid_ema200 = df["ema_200"].dropna()
+            active_slow_col = slow_col if slow_col in df.columns else ("ema_slow" if "ema_slow" in df.columns else ("ema_200" if "ema_200" in df.columns else None))
+            if active_slow_col:
+                valid_slow = df[active_slow_col].dropna()
                 ax_main.plot(
-                    df.loc[valid_ema200.index, "idx"],
-                    valid_ema200,
-                    color=THEME.ema200_color,
-                    linewidth=THEME.ema200_width,
-                    label="EMA 200",
+                    df.loc[valid_slow.index, "idx"],
+                    valid_slow,
+                    color=THEME.ema_slow_color,
+                    linewidth=THEME.ema_slow_width,
+                    label=f"EMA {slow_p}",
                     zorder=4,
                 )
 
@@ -173,13 +183,14 @@ class ChartRenderer:
                     m_idx = match_row["idx"].values[0]
                     m_close = match_row["close"].values[0]
                     m_low = match_row["low"].values[0]
-                    m_ema50 = match_row["ema_50"].values[0] if "ema_50" in match_row and pd.notna(match_row["ema_50"].values[0]) else m_close
+                    marker_fast = active_fast_col and active_fast_col in match_row and pd.notna(match_row[active_fast_col].values[0])
+                    m_ema_fast = match_row[active_fast_col].values[0] if marker_fast else m_close
                     signal_time_str = m.get("signal_time_utc", "")
 
                     # Circle marker at cross point
                     ax_main.scatter(
                         [m_idx],
-                        [m_ema50],
+                        [m_ema_fast],
                         color="#00E5FF",
                         edgecolor="#FFFFFF",
                         s=180,
@@ -194,7 +205,7 @@ class ChartRenderer:
 
                     ax_main.annotate(
                         "● GOLDEN CROSS",
-                        xy=(m_idx, m_ema50),
+                        xy=(m_idx, m_ema_fast),
                         xytext=(m_idx, annot_y),
                         arrowprops=dict(
                             arrowstyle="->",
@@ -247,8 +258,8 @@ class ChartRenderer:
 
             # Legend
             legend_elements = [
-                Line2D([0], [0], color=THEME.ema50_color, lw=2.5, label="EMA 50"),
-                Line2D([0], [0], color=THEME.ema200_color, lw=2.5, label="EMA 200"),
+                Line2D([0], [0], color=THEME.ema_fast_color, lw=2.5, label=f"EMA {fast_p}"),
+                Line2D([0], [0], color=THEME.ema_slow_color, lw=2.5, label=f"EMA {slow_p}"),
                 Line2D([0], [0], marker="o", color="w", markerfacecolor=THEME.candle_up, markersize=8, label="Bullish 1H"),
                 Line2D([0], [0], marker="o", color="w", markerfacecolor=THEME.candle_down, markersize=8, label="Bearish 1H"),
             ]
@@ -293,45 +304,50 @@ class ChartRenderer:
                 curr_candle = df.iloc[target_pos]
                 prev_candle = df.iloc[target_pos - 1]
 
-                curr_ema50 = float(curr_candle.get("ema_50", 0.0))
-                curr_ema200 = float(curr_candle.get("ema_200", 0.0))
-                prev_ema50 = float(prev_candle.get("ema_50", 0.0))
-                prev_ema200 = float(prev_candle.get("ema_200", 0.0))
+                curr_fast = float(curr_candle.get(fast_col, curr_candle.get("ema_fast", curr_candle.get("ema_50", 0.0))))
+                curr_slow = float(curr_candle.get(slow_col, curr_candle.get("ema_slow", curr_candle.get("ema_200", 0.0))))
+                prev_fast = float(prev_candle.get(fast_col, prev_candle.get("ema_fast", prev_candle.get("ema_50", 0.0))))
+                prev_slow = float(prev_candle.get(slow_col, prev_candle.get("ema_slow", prev_candle.get("ema_200", 0.0))))
+
                 stored_event = chart_data.get("target_signal")
-                if stored_event and (stored_event.get("previous_ema50") is None or stored_event.get("previous_ema200") is None):
+                if stored_event:
+                    stored_pf = stored_event.get("previous_ema50") if stored_event.get("previous_ema50") is not None else stored_event.get("previous_ema_fast")
+                    stored_ps = stored_event.get("previous_ema200") if stored_event.get("previous_ema200") is not None else stored_event.get("previous_ema_slow")
+                    if stored_pf is None or stored_ps is None:
+                        logger.error(
+                            f"CHART_DATA_INCONSISTENCY: symbol={symbol}, timeframe={timeframe}, "
+                            f"crossover_timestamp={target_ts}, prev_fast={prev_fast}, "
+                            f"prev_slow={prev_slow}, current_fast={curr_fast}, current_slow={curr_slow}; "
+                            "stored signal lacks previous EMA values"
+                        )
+                        plt.close(fig)
+                        return None
+
+                if not np.isfinite([prev_fast, prev_slow, curr_fast, curr_slow]).all():
                     logger.error(
                         f"CHART_DATA_INCONSISTENCY: symbol={symbol}, timeframe={timeframe}, "
-                        f"crossover_timestamp={target_ts}, prev_ema50={prev_ema50}, "
-                        f"prev_ema200={prev_ema200}, current_ema50={curr_ema50}, current_ema200={curr_ema200}; "
-                        "stored signal lacks previous EMA values"
-                    )
-                    plt.close(fig)
-                    return None
-                if not np.isfinite([prev_ema50, prev_ema200, curr_ema50, curr_ema200]).all():
-                    logger.error(
-                        f"CHART_DATA_INCONSISTENCY: symbol={symbol}, timeframe={timeframe}, "
-                        f"crossover_timestamp={target_ts}, prev_ema50={prev_ema50}, "
-                        f"prev_ema200={prev_ema200}, current_ema50={curr_ema50}, current_ema200={curr_ema200}"
+                        f"crossover_timestamp={target_ts}, prev_fast={prev_fast}, "
+                        f"prev_slow={prev_slow}, current_fast={curr_fast}, current_slow={curr_slow}"
                     )
                     plt.close(fig)
                     return None
 
                 # Section 7: Strict Consistency Validation
-                # Golden Cross definition: previous EMA50 <= previous EMA200 AND current EMA50 > current EMA200
-                is_valid_cross = (prev_ema50 <= prev_ema200) and (curr_ema50 > curr_ema200)
+                # Golden Cross definition: previous fast <= previous slow AND current fast > current slow
+                is_valid_cross = (prev_fast <= prev_slow) and (curr_fast > curr_slow)
                 if not is_valid_cross:
                     logger.error(
                         f"CHART_DATA_INCONSISTENCY: symbol={symbol}, timeframe={timeframe}, "
-                        f"crossover_timestamp={target_ts}, prev_ema50={prev_ema50}, "
-                        f"prev_ema200={prev_ema200}, current_ema50={curr_ema50}, current_ema200={curr_ema200}"
+                        f"crossover_timestamp={target_ts}, prev_fast={prev_fast}, "
+                        f"prev_slow={prev_slow}, current_fast={curr_fast}, current_slow={curr_slow}"
                     )
                     plt.close(fig)
                     return None  # FAIL CLOSED!
 
                 display_close = float(curr_candle["close"])
-                display_ema50 = curr_ema50
-                display_ema200 = curr_ema200
-                banner_text = "SIGNAL: EMA50 CROSS ABOVE EMA200   |   EVENT: GOLDEN CROSS CONFIRMED"
+                display_fast = curr_fast
+                display_slow = curr_slow
+                banner_text = f"SIGNAL: EMA{fast_p} CROSS ABOVE EMA{slow_p}   |   EVENT: GOLDEN CROSS CONFIRMED"
                 banner_color = "#00E676"
                 status_text = "STATUS: GOLDEN CROSS"
                 status_color = "#00E676"
@@ -345,41 +361,42 @@ class ChartRenderer:
                 curr_candle = df.iloc[last_pos]
                 prev_candle = df.iloc[last_pos - 1] if last_pos >= 1 else curr_candle
 
-                curr_ema50 = float(curr_candle.get("ema_50", 0.0))
-                curr_ema200 = float(curr_candle.get("ema_200", 0.0))
-                prev_ema50 = float(prev_candle.get("ema_50", 0.0))
-                prev_ema200 = float(prev_candle.get("ema_200", 0.0))
-                if not np.isfinite([prev_ema50, prev_ema200, curr_ema50, curr_ema200]).all():
+                curr_fast = float(curr_candle.get(fast_col, curr_candle.get("ema_fast", curr_candle.get("ema_50", 0.0))))
+                curr_slow = float(curr_candle.get(slow_col, curr_candle.get("ema_slow", curr_candle.get("ema_200", 0.0))))
+                prev_fast = float(prev_candle.get(fast_col, prev_candle.get("ema_fast", prev_candle.get("ema_50", 0.0))))
+                prev_slow = float(prev_candle.get(slow_col, prev_candle.get("ema_slow", prev_candle.get("ema_200", 0.0))))
+
+                if not np.isfinite([prev_fast, prev_slow, curr_fast, curr_slow]).all():
                     logger.error(
                         f"CHART_DATA_INCONSISTENCY: symbol={symbol}, timeframe={timeframe}, "
-                        f"crossover_timestamp={curr_candle.get('timestamp')}, prev_ema50={prev_ema50}, "
-                        f"prev_ema200={prev_ema200}, current_ema50={curr_ema50}, current_ema200={curr_ema200}"
+                        f"crossover_timestamp={curr_candle.get('timestamp')}, prev_fast={prev_fast}, "
+                        f"prev_slow={prev_slow}, current_fast={curr_fast}, current_slow={curr_slow}"
                     )
                     plt.close(fig)
                     return None
 
                 display_close = float(curr_candle["close"])
-                display_ema50 = curr_ema50
-                display_ema200 = curr_ema200
+                display_fast = curr_fast
+                display_slow = curr_slow
 
                 # Evaluate current candle EMA structure
-                if prev_ema50 <= prev_ema200 and curr_ema50 > curr_ema200:
-                    banner_text = "SIGNAL: EMA50 CROSS ABOVE EMA200   |   STATUS: GOLDEN CROSS CONFIRMED"
+                if prev_fast <= prev_slow and curr_fast > curr_slow:
+                    banner_text = f"SIGNAL: EMA{fast_p} CROSS ABOVE EMA{slow_p}   |   STATUS: GOLDEN CROSS CONFIRMED"
                     banner_color = "#00E676"
                     status_text = "STATUS: GOLDEN CROSS"
                     status_color = "#00E676"
-                elif curr_ema50 > curr_ema200:
-                    banner_text = "MARKET OVERVIEW   |   CURRENT STRUCTURE: BULLISH (EMA50 > EMA200)"
+                elif curr_fast > curr_slow:
+                    banner_text = f"MARKET OVERVIEW   |   CURRENT STRUCTURE: BULLISH (EMA{fast_p} > EMA{slow_p})"
                     banner_color = "#00E676"
                     status_text = "STATUS: BULLISH"
                     status_color = "#00E676"
-                elif curr_ema50 < curr_ema200:
-                    banner_text = "MARKET OVERVIEW   |   CURRENT STRUCTURE: BEARISH (EMA50 < EMA200)"
+                elif curr_fast < curr_slow:
+                    banner_text = f"MARKET OVERVIEW   |   CURRENT STRUCTURE: BEARISH (EMA{fast_p} < EMA{slow_p})"
                     banner_color = "#FF5252"
                     status_text = "STATUS: BEARISH"
                     status_color = "#FF5252"
                 else:
-                    banner_text = "MARKET OVERVIEW   |   CURRENT STRUCTURE: NEUTRAL (EMA50 == EMA200)"
+                    banner_text = f"MARKET OVERVIEW   |   CURRENT STRUCTURE: NEUTRAL (EMA{fast_p} == EMA{slow_p})"
                     banner_color = "#FFD600"
                     status_text = "STATUS: NEUTRAL"
                     status_color = "#FFD600"
@@ -422,9 +439,9 @@ class ChartRenderer:
             ax_info.text(0.04, 0.40, f"CLOSE: {format_price(display_close)}", color="#E2E8F0", fontsize=10)
             ax_info.text(0.04, 0.12, "CANDLE: CLOSED", color="#00E676", fontsize=9.5, fontweight="bold")
 
-            # Mid column: EMA50 & EMA200 & Status
-            ax_info.text(0.38, 0.72, f"EMA 50: {format_price(display_ema50)}", color=THEME.ema50_color, fontsize=10, fontweight="bold")
-            ax_info.text(0.38, 0.40, f"EMA 200: {format_price(display_ema200)}", color=THEME.ema200_color, fontsize=10, fontweight="bold")
+            # Mid column: EMA fast & EMA slow & Status
+            ax_info.text(0.38, 0.72, f"EMA {fast_p}: {format_price(display_fast)}", color=THEME.ema_fast_color, fontsize=10, fontweight="bold")
+            ax_info.text(0.38, 0.40, f"EMA {slow_p}: {format_price(display_slow)}", color=THEME.ema_slow_color, fontsize=10, fontweight="bold")
             ax_info.text(0.38, 0.12, status_text, color=status_color, fontsize=9.5, fontweight="bold")
 
             # Right column: Time

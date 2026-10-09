@@ -60,9 +60,13 @@ export interface CrossMarker {
 export interface ChartResponse {
   symbol: string;
   timeframe: string;
+  fast_period?: number;
+  slow_period?: number;
   candles: CandleData[];
-  ema50: LineData[];
-  ema200: LineData[];
+  ema50?: LineData[];
+  ema200?: LineData[];
+  ema_fast?: LineData[];
+  ema_slow?: LineData[];
   cross_markers: CrossMarker[];
   latest: {
     symbol: string;
@@ -72,8 +76,10 @@ export interface ChartResponse {
     high: number;
     low: number;
     volume: number;
-    ema50: number | null;
-    ema200: number | null;
+    ema50?: number | null;
+    ema200?: number | null;
+    ema_fast?: number | null;
+    ema_slow?: number | null;
     timestamp: number;
     total_candles: number;
   };
@@ -85,8 +91,12 @@ export interface RecentSignal {
   timeframe: string;
   candle_timestamp: number;
   signal_time_utc: string;
-  ema50: number;
-  ema200: number;
+  ema50?: number;
+  ema200?: number;
+  ema_fast?: number;
+  ema_slow?: number;
+  fast_period?: number;
+  slow_period?: number;
   close_price: number;
   chart_image_path: string | null;
   telegram_sent: number;
