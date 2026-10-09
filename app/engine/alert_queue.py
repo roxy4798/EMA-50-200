@@ -53,6 +53,16 @@ class AlertQueue:
             except asyncio.CancelledError:
                 pass
             self._worker_task = None
+            # stop() has always been an immediate shutdown: queued alerts are
+            # not processed after it is called. Balance Queue.join() accounting
+            # for those discarded items so shutdown cannot strand joiners.
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                else:
+                    self._queue.task_done()
             logger.info("AlertQueue worker stopped.")
 
     async def enqueue(self, signal_id: int, signal: GoldenCrossSignal) -> None:
@@ -64,13 +74,19 @@ class AlertQueue:
         while self._running:
             try:
                 signal_id, signal = await self._queue.get()
-                await self._process_alert(signal_id, signal)
-                self._queue.task_done()
             except asyncio.CancelledError:
                 break
+
+            try:
+                await self._process_alert(signal_id, signal)
             except Exception as e:
                 logger.error(f"Unexpected error in alert worker loop: {e}", exc_info=True)
+                self.total_failed += 1
                 await asyncio.sleep(0.5)
+            finally:
+                # Every successful get() must have exactly one task_done(),
+                # including failures and cancellation during processing.
+                self._queue.task_done()
 
     async def _process_alert(self, signal_id: int, signal: GoldenCrossSignal) -> None:
         """Processes a single alert: validates canonical cross on 1000 candles, renders chart, sends telegram, updates database."""

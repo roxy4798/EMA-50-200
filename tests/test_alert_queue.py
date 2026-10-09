@@ -1,6 +1,8 @@
 """Unit and integration tests for AlertQueue and API Server."""
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 import pytest
 from httpx import AsyncClient, ASGITransport
 
@@ -14,6 +16,50 @@ from app.indicators.ema import GoldenCrossSignal
 from app.notifications.telegram_bot import TelegramNotifier
 from app.persistence.database import Database
 from app.api.server import create_app
+
+
+def _queue_for_worker_lifecycle_test():
+    """Build a queue whose dependencies are unused by the patched worker."""
+    return AlertQueue(None, None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_alert_queue_task_done_after_unexpected_processing_failure():
+    queue = _queue_for_worker_lifecycle_test()
+    queue._process_alert = AsyncMock(side_effect=RuntimeError("simulated failure"))
+    queue.start()
+
+    try:
+        await queue.enqueue(1, SimpleNamespace(symbol="BTCUSDT"))
+        await asyncio.wait_for(queue._queue.join(), timeout=2)
+
+        assert queue.total_failed == 1
+        assert queue.total_processed == 0
+        assert queue._queue.qsize() == 0
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_alert_queue_stop_balances_active_and_pending_tasks():
+    queue = _queue_for_worker_lifecycle_test()
+    processing_started = asyncio.Event()
+
+    async def wait_until_cancelled(_signal_id, _signal):
+        processing_started.set()
+        await asyncio.Event().wait()
+
+    queue._process_alert = wait_until_cancelled
+    queue.start()
+    await queue.enqueue(1, SimpleNamespace(symbol="BTCUSDT"))
+    await queue.enqueue(2, SimpleNamespace(symbol="ETHUSDT"))
+
+    await asyncio.wait_for(processing_started.wait(), timeout=2)
+    await queue.stop()
+    await asyncio.wait_for(queue._queue.join(), timeout=2)
+
+    assert queue._queue.qsize() == 0
+    assert queue._queue._unfinished_tasks == 0
 
 
 @pytest.mark.asyncio
@@ -79,17 +125,14 @@ async def test_alert_queue_processing(tmp_path):
         })
     binance_client.get_klines = AsyncMock(return_value=mock_candles)
 
-    # Enqueue
-    await queue.enqueue(sig_id, signal)
-    # Wait for queue to be processed
-    for _ in range(30):
-        if queue.total_processed >= 1:
-            break
-        await asyncio.sleep(0.1)
-
-    assert queue.total_processed >= 1
-    await queue.stop()
-    await binance_client.close()
+    try:
+        await queue.enqueue(sig_id, signal)
+        await asyncio.wait_for(queue._queue.join(), timeout=10)
+        assert queue.total_processed >= 1
+    finally:
+        await queue.stop()
+        await binance_client.close()
+        await telegram.close()
 
 
 @pytest.mark.asyncio

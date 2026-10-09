@@ -44,6 +44,9 @@ async def get_test_env(tmp_path):
         await db.save_signal(rec)
 
     client = BinanceFuturesClient()
+    # Command tests should not open real Binance HTTP sessions. The dashboard
+    # only needs a deterministic online status for these presentation checks.
+    client.check_connectivity = AsyncMock(return_value=True)
     client.get_klines = AsyncMock(return_value=[
         {"timestamp": now_ms - 3 * 3600_000, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 8.0},
         {"timestamp": now_ms - 2 * 3600_000, "open": 100.0, "high": 106.0, "low": 99.0, "close": 105.0, "volume": 10.0},

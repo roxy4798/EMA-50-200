@@ -143,27 +143,26 @@ async def test_full_live_pipeline_e2e(tmp_path):
     assert signals[0]["is_live"] == 1
     print("[TEST MODE] Signal successfully persisted to SQLite with is_live=1.")
 
-    # STEP 7 & 8: Alert queue processes signal and renders 1600x900 chart
-    # Wait for background queue worker to process
-    await asyncio.sleep(1.5)
-    assert alert_queue.total_processed >= 1, "AlertQueue must process the signal"
+    try:
+        # STEP 7 & 8: Wait for the worker to mark this item complete.
+        await asyncio.wait_for(alert_queue._queue.join(), timeout=15)
+        assert alert_queue.total_processed >= 1, "AlertQueue must process the signal"
 
-    # STEP 9: Telegram sender was called with GoldenCrossSignal and chart path
-    assert telegram_send_mock.call_count == 1, "Telegram notifier must be invoked exactly once"
-    call_args = telegram_send_mock.call_args[1]
-    assert call_args["signal"].symbol == "BTCUSDT"
-    print("[TEST MODE] Telegram alert dispatched successfully.")
+        # STEP 9: Telegram sender was called with GoldenCrossSignal and chart path
+        assert telegram_send_mock.call_count == 1, "Telegram notifier must be invoked exactly once"
+        call_args = telegram_send_mock.call_args[1]
+        assert call_args["signal"].symbol == "BTCUSDT"
+        print("[TEST MODE] Telegram alert dispatched successfully.")
 
-    # STEP 10: Duplicate alert prevention test
-    # Re-feed the exact same candle timestamp
-    duplicate_signal = await engine.handle_closed_candle(symbol, ws_candle_event)
-    assert duplicate_signal is None, "Duplicate candle timestamp MUST return None"
-    # Verify no additional signal was persisted and no second telegram was dispatched
-    signals_after = await db.get_recent_signals(limit=5)
-    assert len(signals_after) == 1, "Database must still contain only 1 signal record"
-    assert telegram_send_mock.call_count == 1, "Telegram must NOT receive a duplicate alert"
-    print("[TEST MODE] Duplicate alert prevention verified: 0 duplicate dispatches.")
-
-    await alert_queue.stop()
-    await client.close()
+        # STEP 10: Duplicate alert prevention test
+        duplicate_signal = await engine.handle_closed_candle(symbol, ws_candle_event)
+        assert duplicate_signal is None, "Duplicate candle timestamp MUST return None"
+        signals_after = await db.get_recent_signals(limit=5)
+        assert len(signals_after) == 1, "Database must still contain only 1 signal record"
+        assert telegram_send_mock.call_count == 1, "Telegram must NOT receive a duplicate alert"
+        print("[TEST MODE] Duplicate alert prevention verified: 0 duplicate dispatches.")
+    finally:
+        await alert_queue.stop()
+        await client.close()
+        await telegram.close()
     print("[TEST MODE] Complete pipeline test PASSED successfully!\n")

@@ -299,12 +299,18 @@ async def test_alert_queue_uses_configured_50_500(tmp_path):
         })
     client.get_klines = AsyncMock(return_value=mock_candles)
 
-    await queue.enqueue(sig_id, signal)
-    # Give the queue worker a moment to process
-    await asyncio.sleep(0.8)
+    try:
+        await queue.enqueue(sig_id, signal)
+        # Wait for actual completion; a fixed delay races with chart rendering
+        # and machine load, while Queue.join() tracks the worker's task_done().
+        await asyncio.wait_for(queue._queue.join(), timeout=10)
 
-    assert queue.total_processed >= 1
-    await queue.stop()
+        assert queue.total_processed >= 1
+        assert queue.total_failed == 0
+    finally:
+        await queue.stop()
+        await client.close()
+        await telegram.close()
 
 
 # ============================================================================
